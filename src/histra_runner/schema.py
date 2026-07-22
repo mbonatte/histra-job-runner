@@ -20,6 +20,12 @@ class ModelSpec:
 
 
 @dataclass(frozen=True)
+class ScourSpec:
+    foundation_interface_materials: tuple[str, ...] = ("Foundation_Soil", "Soil")
+    scoured_foundation_interface_material: str = "Soil_removed"
+
+
+@dataclass(frozen=True)
 class MeshSpec:
     enabled: bool = True
     analysis_name: str = "StartMesh"
@@ -58,6 +64,7 @@ class AnalysisOutputs:
 class AnalysisSpec:
     name: str
     timeout_seconds: float = 3600.0
+    interfaces: dict[str, Any] = field(default_factory=dict)
     outputs: AnalysisOutputs = field(default_factory=AnalysisOutputs)
 
 
@@ -75,6 +82,7 @@ class JobSpec:
     model: ModelSpec
     analyses: tuple[AnalysisSpec, ...]
     mesh: MeshSpec = field(default_factory=MeshSpec)
+    scour: ScourSpec = field(default_factory=ScourSpec)
     validation: ValidationSpec = field(default_factory=ValidationSpec)
     attempt_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -131,6 +139,40 @@ def _optional_step(data: dict[str, Any], label: str) -> int | None:
     if isinstance(step, bool) or not isinstance(step, int) or step < 0:
         raise JobValidationError(f"{label}.step must be a non-negative integer or null.")
     return step
+
+
+
+def _scour_delta(value: Any, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise JobValidationError(f"{label} must be a number between 0 and 1.")
+    delta = float(value)
+    if not 0 <= delta <= 1:
+        raise JobValidationError(f"{label} must be between 0 and 1.")
+    return delta
+
+
+def _parse_interfaces(data: Any, label: str) -> dict[str, Any]:
+    raw = _mapping(data or {}, label)
+    parsed: dict[str, Any] = {}
+    supported_modes = {"uniform", "left", "right", "upstream", "downstream"}
+    for pier, scour_config in raw.items():
+        if not isinstance(pier, str) or not pier.strip():
+            raise JobValidationError(f"{label} pier names must be non-empty strings.")
+        if isinstance(scour_config, dict):
+            if not scour_config:
+                raise JobValidationError(f"{label}.{pier} must define at least one scour mode.")
+            modes: dict[str, float] = {}
+            for mode, delta in scour_config.items():
+                if mode not in supported_modes:
+                    expected = ", ".join(sorted(supported_modes))
+                    raise JobValidationError(
+                        f"{label}.{pier} has unsupported mode '{mode}'. Expected: {expected}."
+                    )
+                modes[mode] = _scour_delta(delta, f"{label}.{pier}.{mode}")
+            parsed[pier] = modes
+        else:
+            parsed[pier] = _scour_delta(scour_config, f"{label}.{pier}")
+    return parsed
 
 
 def _parse_outputs(data: Any, label: str) -> AnalysisOutputs:
@@ -215,6 +257,9 @@ def job_spec_from_dict(data: Any) -> JobSpec:
                     analysis_data.get("timeout_seconds", 3600),
                     f"analyses[{index}].timeout_seconds",
                 ),
+                interfaces=_parse_interfaces(
+                    analysis_data.get("interfaces", {}), f"analyses[{index}].interfaces"
+                ),
                 outputs=_parse_outputs(
                     analysis_data.get("outputs", {}), f"analyses[{index}].outputs"
                 ),
@@ -231,6 +276,30 @@ def job_spec_from_dict(data: Any) -> JobSpec:
         timeout_seconds=_positive_number(
             mesh_data.get("timeout_seconds", 600), "mesh.timeout_seconds"
         ),
+    )
+
+    scour_data = _mapping(raw.get("scour", {}), "scour")
+    raw_default_materials = scour_data.get(
+        "foundation_interface_materials", ["Foundation_Soil", "Soil"]
+    )
+    if (
+        not isinstance(raw_default_materials, list)
+        or not raw_default_materials
+        or any(not isinstance(item, str) or not item.strip() for item in raw_default_materials)
+    ):
+        raise JobValidationError(
+            "scour.foundation_interface_materials must be a non-empty list of material names."
+        )
+    scoured_material = scour_data.get(
+        "scoured_foundation_interface_material", "Soil_removed"
+    )
+    if not isinstance(scoured_material, str) or not scoured_material.strip():
+        raise JobValidationError(
+            "scour.scoured_foundation_interface_material must be a non-empty string."
+        )
+    scour = ScourSpec(
+        foundation_interface_materials=tuple(raw_default_materials),
+        scoured_foundation_interface_material=scoured_material,
     )
 
     validation_data = _mapping(raw.get("validation", {}), "validation")
@@ -257,6 +326,7 @@ def job_spec_from_dict(data: Any) -> JobSpec:
         attempt_id=attempt_id,
         model=ModelSpec(path=model_path, sha256=model_hash),
         mesh=mesh,
+        scour=scour,
         validation=validation,
         analyses=tuple(analyses),
         metadata=metadata,

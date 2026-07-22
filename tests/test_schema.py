@@ -37,3 +37,35 @@ def test_default_outputs_are_lightweight_and_explicit():
     assert outputs.reactions.enabled
     assert outputs.displacements.enabled
     assert not outputs.modal_contributions.enabled
+
+
+def test_preserves_existing_scour_names_and_numeric_shorthand():
+    data = base_job()
+    data["analyses"][0]["interfaces"] = {
+        "pier_1": {"uniform": 0.2, "upstream": 0.1},
+        "pier_2": 0.3,
+    }
+    data["scour"] = {
+        "foundation_interface_materials": ["Foundation_Soil", "Soil"],
+        "scoured_foundation_interface_material": "Soil_removed",
+    }
+
+    spec = job_spec_from_dict(data)
+    assert spec.analyses[0].interfaces == {
+        "pier_1": {"uniform": 0.2, "upstream": 0.1},
+        "pier_2": 0.3,
+    }
+    assert spec.scour.foundation_interface_materials == ("Foundation_Soil", "Soil")
+    assert spec.scour.scoured_foundation_interface_material == "Soil_removed"
+
+
+def test_rejects_invalid_scour_mode_and_delta():
+    data = base_job()
+    data["analyses"][0]["interfaces"] = {"pier_1": {"diagonal": 0.2}}
+    with pytest.raises(JobValidationError, match="unsupported mode"):
+        job_spec_from_dict(data)
+
+    data = base_job()
+    data["analyses"][0]["interfaces"] = {"pier_1": {"left": 1.2}}
+    with pytest.raises(JobValidationError, match="between 0 and 1"):
+        job_spec_from_dict(data)

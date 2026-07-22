@@ -31,5 +31,10 @@ changed:
   dependency states are preserved between solver calls;
 - status is recorded in `state.json` instead of relying only on console output.
 
-The original `modelxml` and scenario-generation code can now be developed as a
-server/model-builder package independently from this runner.
+The scenario-generation, material-update and load-position code can now be
+developed as a server/model-builder package independently from this runner.
+The exception is the existing foundation-interface scour mutation. Because the
+material state must change between sequential HiStrA analyses, the functions
+`run_update_foundation_ifaces`, `update_foundation_interfaces`,
+`set_default_interface` and `_select_outside_delta_interfaces` are retained in
+the client runner and executed immediately before the relevant analysis.

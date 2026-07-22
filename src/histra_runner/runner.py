@@ -27,6 +27,7 @@ from .hrx import (
 from .jsonio import utc_now_iso, write_json_atomic
 from .schema import AnalysisSpec, JobSpec, load_job_spec, sha256_file
 from .solver import SolverClient, SolverExecution, SubprocessSolver
+from .scour import run_update_foundation_ifaces
 from .state import StateStore
 
 
@@ -85,6 +86,8 @@ class JobRunner:
         started = time.perf_counter()
         executions: list[dict] = []
         validation_evidence: list[dict] = []
+        mutation_evidence: list[dict] = []
+        mutation_by_analysis: dict[str, dict] = {}
 
         try:
             state.transition("validating")
@@ -120,8 +123,23 @@ class JobRunner:
             requested_by_name = {analysis.name: analysis for analysis in spec.analyses}
             default_timeout = max(analysis.timeout_seconds for analysis in spec.analyses)
             for index, name in enumerate(run_order, start=1):
-                state.transition("running", stage="analysis", analysis=name)
                 analysis_spec = requested_by_name.get(name)
+                state.transition("mutating", stage="foundation_interfaces", analysis=name)
+                mutation = run_update_foundation_ifaces(
+                    run_model,
+                    analysis_spec.interfaces if analysis_spec else {},
+                    foundation_interface_materials=(
+                        spec.scour.foundation_interface_materials
+                    ),
+                    scoured_foundation_interface_material=(
+                        spec.scour.scoured_foundation_interface_material
+                    ),
+                )
+                mutation["analysis"] = name
+                mutation_evidence.append(mutation)
+                mutation_by_analysis[name] = mutation
+
+                state.transition("running", stage="analysis", analysis=name)
                 timeout = analysis_spec.timeout_seconds if analysis_spec else default_timeout
                 execution, evidence = self._execute_analysis(
                     run_model,
@@ -148,6 +166,7 @@ class JobRunner:
                 )
                 analysis_results[analysis_spec.name] = {
                     "analysis_key": key,
+                    "interfaces": mutation_by_analysis.get(analysis_spec.name),
                     "validation": evidence,
                     "outputs": outputs,
                 }
@@ -176,6 +195,7 @@ class JobRunner:
                     results_database=results_database,
                     executions=executions,
                     validation_evidence=validation_evidence,
+                    mutation_evidence=mutation_evidence,
                     status="completed",
                 ),
             )
@@ -283,12 +303,13 @@ class JobRunner:
         results_database: Path,
         executions: list[dict],
         validation_evidence: list[dict],
+        mutation_evidence: list[dict],
         status: str,
     ) -> dict:
         try:
             package_version = version("histra-job-runner")
         except PackageNotFoundError:
-            package_version = "0.1.0+source"
+            package_version = "0.2.0+source"
         return {
             "schema_version": "1.0",
             "job_id": spec.job_id,
@@ -314,6 +335,7 @@ class JobRunner:
                 else None,
             },
             "executions": executions,
+            "mutations": mutation_evidence,
             "validation": validation_evidence,
             "metadata": spec.metadata,
         }

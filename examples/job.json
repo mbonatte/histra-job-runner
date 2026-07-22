@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "job_id": "bridge-001-scour-050",
+  "job_id": "bridge-001-scour-sequence",
   "model": {
     "path": "model.hrx"
   },
@@ -9,7 +9,35 @@
     "analysis_name": "StartMesh",
     "timeout_seconds": 900
   },
+  "scour": {
+    "foundation_interface_materials": ["Foundation_Soil", "Soil"],
+    "scoured_foundation_interface_material": "Soil_removed"
+  },
   "analyses": [
+    {
+      "name": "Scour_1",
+      "timeout_seconds": 3600,
+      "interfaces": {
+        "pier_1": {
+          "uniform": 0.2
+        }
+      },
+      "outputs": {
+        "displacements": {
+          "enabled": true,
+          "all_steps": true,
+          "model_point_ids": []
+        },
+        "reactions": {
+          "enabled": true,
+          "all_steps": true
+        },
+        "modal_contributions": {
+          "enabled": false,
+          "top_n": 3
+        }
+      }
+    },
     {
       "name": "LiveLoad_1",
       "timeout_seconds": 3600,
@@ -36,6 +64,6 @@
     "minimum_results_bytes": 1
   },
   "metadata": {
-    "scenario_id": "bridge-001-scour-050"
+    "scenario_id": "bridge-001-scour-sequence"
   }
 }

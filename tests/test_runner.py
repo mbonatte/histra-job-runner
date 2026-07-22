@@ -172,3 +172,118 @@ def test_completed_dependency_is_preserved_and_not_rerun(tmp_path: Path):
     }
     assert states["Vert"] == COMPLETED
     assert states["LiveLoad_1"] == COMPLETED
+
+
+class RecordingFakeSolver(FakeSolver):
+    def __init__(self):
+        self.interface_states: list[tuple[str, dict[str, str | None]]] = []
+
+    def run(self, model_path: Path, timeout_seconds: float) -> SolverExecution:
+        root = read_hrx(model_path)
+        selected_name = next(
+            analysis.get("Name")
+            for analysis in root.iter("Analysis")
+            if any(
+                state.get("State") == TO_RUN
+                for state in analysis.find("States").findall("State")
+            )
+        )
+        self.interface_states.append(
+            (
+                selected_name,
+                {
+                    interface.get("Key"): interface.get("MaterialKey")
+                    for interface in root.iter("Interface")
+                },
+            )
+        )
+        return super().run(model_path, timeout_seconds)
+
+
+def write_scour_sequence_model(path: Path) -> None:
+    root = ET.fromstring(
+        """
+        <Root>
+          <Template Key="10" Name="Foundation_Soil" TypeOf="MasonryMaterial" />
+          <Template Key="11" Name="Soil" PurposeType="MasonryMaterial" />
+          <Template Key="99" Name="Soil_removed" TypeOf="MasonryMaterial" />
+          <Pier H="10" Hf="5" B1f="40" b2="20" B3f="40"
+                W1f="5" w2="10" W3f="5">
+            <ReferenceSystem Origin="0;10;0" />
+          </Pier>
+          <Interface Key="left" ParentTypeElement1="Restraint" MaterialKey="10"
+                     VInt3D1="-40;10;-15" VInt3D2="-40;10;-15"
+                     VInt3D3="-40;10;-15" VInt3D4="-40;10;-15" />
+          <Interface Key="middle" ParentTypeElement1="Restraint" MaterialKey="10"
+                     VInt3D1="0;10;-15" VInt3D2="0;10;-15"
+                     VInt3D3="0;10;-15" VInt3D4="0;10;-15" />
+          <Interface Key="right" ParentTypeElement1="Restraint" MaterialKey="10"
+                     VInt3D1="40;10;-15" VInt3D2="40;10;-15"
+                     VInt3D3="40;10;-15" VInt3D4="40;10;-15" />
+          <Analysis Name="Vert" Key="1" InitialAnalysisKey="-100">
+            <States><State Id="1" State="NotExecutedNotToBeExecuted" /></States>
+          </Analysis>
+          <Analysis Name="Scour_1" Key="2" InitialAnalysisKey="1">
+            <States><State Id="1" State="NotExecutedNotToBeExecuted" /></States>
+          </Analysis>
+          <Analysis Name="LiveLoad_1" Key="3" InitialAnalysisKey="2">
+            <States><State Id="1" State="NotExecutedNotToBeExecuted" /></States>
+          </Analysis>
+          <Analysis Name="Scour_2" Key="4" InitialAnalysisKey="1">
+            <States><State Id="1" State="NotExecutedNotToBeExecuted" /></States>
+          </Analysis>
+          <Analysis Name="LiveLoad_2" Key="5" InitialAnalysisKey="4">
+            <States><State Id="1" State="NotExecutedNotToBeExecuted" /></States>
+          </Analysis>
+        </Root>
+        """
+    )
+    ET.ElementTree(root).write(path, encoding="utf-16", xml_declaration=True)
+
+
+def test_scour_mutation_runs_between_analysis_steps_and_persists(tmp_path: Path):
+    package = tmp_path / "package"
+    package.mkdir()
+    write_scour_sequence_model(package / "model.hrx")
+    job = {
+        "schema_version": "1.0",
+        "job_id": "bridge-scour-sequence",
+        "model": {"path": "model.hrx"},
+        "mesh": {"enabled": False},
+        "analyses": [
+            {"name": "Scour_1", "interfaces": {"pier_1": {"left": 0.25}}},
+            {"name": "LiveLoad_1"},
+            {"name": "Scour_2", "interfaces": {"pier_1": {"right": 0.25}}},
+            {"name": "LiveLoad_2"},
+        ],
+    }
+    (package / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    config = RunnerConfig(
+        solver=SolverConfig(executable=tmp_path / "not-used.exe"),
+        workspace_root=tmp_path / "work",
+    )
+    solver = RecordingFakeSolver()
+    outcome = JobRunner(config, solver=solver).run_job_file(package / "job.json")
+
+    states = dict(solver.interface_states)
+    assert states["Vert"] == {"left": "10", "middle": "10", "right": "10"}
+    assert states["Scour_1"] == {"left": "99", "middle": "10", "right": "10"}
+    assert states["LiveLoad_1"] == {"left": "99", "middle": "10", "right": "10"}
+    assert states["Scour_2"] == {"left": "10", "middle": "10", "right": "99"}
+    assert states["LiveLoad_2"] == {"left": "10", "middle": "10", "right": "99"}
+
+    manifest = read_json(outcome.manifest_path)
+    assert [item["analysis"] for item in manifest["mutations"]] == [
+        "Vert",
+        "Scour_1",
+        "LiveLoad_1",
+        "Scour_2",
+        "LiveLoad_2",
+    ]
+    assert manifest["mutations"][1]["piers"]["pier_1"]["scoured_interface_keys"] == [
+        "left"
+    ]
+    results = read_json(outcome.results_path)
+    assert results["analyses"]["Scour_2"]["interfaces"]["piers"]["pier_1"][
+        "scoured_interface_keys"
+    ] == ["right"]

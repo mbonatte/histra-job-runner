@@ -12,8 +12,9 @@ only needs to download a job directory, call this package, and upload the
 
 The **server/model-generation side** is responsible for:
 
-- bridge geometry, materials, load positions, scour scenarios and HRX mutation;
-- generating the final `.hrx` sent to the client;
+- bridge geometry, materials and load-position creation;
+- defining the ordered per-analysis scour scenario in `job.json`;
+- generating the base `.hrx` sent to the client;
 - deciding which analyses and result subsets are required.
 
 The **client runner** is responsible for:
@@ -21,6 +22,7 @@ The **client runner** is responsible for:
 - validating a self-contained job package;
 - staging the HRX in an isolated attempt workspace;
 - running the mesh and requested analyses;
+- applying the foundation-interface scour mutation before each analysis step;
 - resolving analysis dependencies through `InitialAnalysisKey`;
 - checking solver exit codes, HRX states and the results database;
 - extracting only the requested rows into JSON;
@@ -36,6 +38,7 @@ histra-job-runner/
 │   ├── config.py       # machine-specific TOML settings
 │   ├── schema.py       # job.json schema and package validation
 │   ├── hrx.py          # analysis selection, dependencies and completion evidence
+│   ├── scour.py        # per-analysis foundation-interface material mutation
 │   ├── solver.py       # local/PsExec process execution and targeted timeout cleanup
 │   ├── extraction.py   # read-only SQLite extraction without pandas
 │   ├── runner.py       # job lifecycle and workspace orchestration
@@ -103,7 +106,23 @@ Example:
     "analysis_name": "StartMesh",
     "timeout_seconds": 900
   },
+  "scour": {
+    "foundation_interface_materials": ["Foundation_Soil", "Soil"],
+    "scoured_foundation_interface_material": "Soil_removed"
+  },
   "analyses": [
+    {
+      "name": "Scour_1",
+      "timeout_seconds": 3600,
+      "interfaces": {
+        "pier_1": {"uniform": 0.20}
+      },
+      "outputs": {
+        "displacements": {"enabled": true, "all_steps": true, "model_point_ids": []},
+        "reactions": {"enabled": true, "all_steps": true},
+        "modal_contributions": {"enabled": false, "top_n": 3}
+      }
+    },
     {
       "name": "LiveLoad_1",
       "timeout_seconds": 3600,
@@ -137,6 +156,38 @@ Example:
 
 `model.sha256` may be omitted or set to a real 64-character SHA-256 digest. It
 should be populated by the server in the network stage.
+
+## Per-analysis scour mutation
+
+Use the same names already used by the supplied automation code:
+
+```json
+{
+  "name": "Scour_1",
+  "interfaces": {
+    "pier_1": {
+      "left": 0.20,
+      "upstream": 0.10
+    },
+    "pier_2": 0.30
+  }
+}
+```
+
+Supported modes remain `uniform`, `left`, `right`, `upstream` and
+`downstream`. A direct numeric value such as `"pier_2": 0.30` remains the
+backward-compatible shorthand for uniform scour.
+
+Before an analysis with a non-empty `interfaces` object, the runner calls
+`run_update_foundation_ifaces`. For each referenced pier it restores all bottom
+foundation interfaces to the first available material in
+`foundation_interface_materials`, then assigns
+`scoured_foundation_interface_material` to the selected interfaces. Analyses
+with no `interfaces` object preserve the interface state left by the preceding
+analysis. Therefore the order of the `analyses` list is significant.
+
+The applied interface keys and material names are written to both `run.json`
+and the corresponding entry in `results.json`.
 
 ## Commands
 
@@ -204,9 +255,11 @@ deleted only after the server accepts the upload.
 | hard-coded executable paths | machine-specific `runner.toml` |
 | global `taskkill /IM SolverHistra.exe` | targeted process-tree termination by PID |
 
-`build_scenarios.py`, material changes, load-position creation and scour HRX
-mutation should remain on the server/model-generation side. They are
-intentionally not part of this client package.
+`build_scenarios.py`, material changes and load-position creation remain on the
+server/model-generation side. The scour scenario is also chosen on the server,
+but its HRX mutation is intentionally executed by this client immediately
+before each analysis. This preserves the sequential interface state required by
+HiStrA.
 
 ## Network step later
 
