@@ -1,0 +1,41 @@
+{
+  "schema_version": "1.0",
+  "job_id": "bridge-001-scour-050",
+  "model": {
+    "path": "model.hrx"
+  },
+  "mesh": {
+    "enabled": true,
+    "analysis_name": "StartMesh",
+    "timeout_seconds": 900
+  },
+  "analyses": [
+    {
+      "name": "LiveLoad_1",
+      "timeout_seconds": 3600,
+      "outputs": {
+        "displacements": {
+          "enabled": true,
+          "all_steps": true,
+          "model_point_ids": []
+        },
+        "reactions": {
+          "enabled": true,
+          "all_steps": true
+        },
+        "modal_contributions": {
+          "enabled": false,
+          "top_n": 3
+        }
+      }
+    }
+  ],
+  "validation": {
+    "require_completed_state": true,
+    "require_results_database": true,
+    "minimum_results_bytes": 1
+  },
+  "metadata": {
+    "scenario_id": "bridge-001-scour-050"
+  }
+}
