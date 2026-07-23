@@ -309,7 +309,7 @@ class JobRunner:
         try:
             package_version = version("histra-job-runner")
         except PackageNotFoundError:
-            package_version = "0.2.0+source"
+            package_version = "0.3.0+source"
         return {
             "schema_version": "1.0",
             "job_id": spec.job_id,

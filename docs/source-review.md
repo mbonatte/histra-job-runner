@@ -19,8 +19,8 @@ changed:
   runner configuration passed to the package;
 - `run_scenario` no longer catches errors and then returns as though execution
   finished; failed jobs now raise a typed exception and write durable evidence;
-- temporary raw files are retained by default, which is required before a
-  future server acknowledgement;
+- temporary raw files are retained by default, which is required until the
+  server acknowledges the uploaded result;
 - timeout cleanup targets the process tree created for that job rather than all
   `SolverHistra.exe` processes on the computer;
 - extraction uses read-only SQLite queries directly and does not load entire

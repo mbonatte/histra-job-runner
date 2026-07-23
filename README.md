@@ -1,54 +1,73 @@
-# HiStrA Job Runner
+# HiStrA Job Runner 0.3.0
 
-A local, network-agnostic Windows worker for running prepared HiStrA Bridges
-models and extracting small JSON result packages.
+Windows job runner and HTTPS pull worker for HiStrA Bridges analyses.
 
-This is **step 1** of the distributed-worker architecture. It deliberately has
-no HTTPS, token, server, queue, or GitHub update logic. A future network worker
-only needs to download a job directory, call this package, and upload the
-`output/` directory.
+The package keeps the numerical runner independent from the network adapter:
+
+```text
+HiStrA job server
+    ↓ claim + package
+HTTPS worker adapter
+    ↓ local job.json
+JobRunner
+    ↓
+HiStrA solver → scour mutation between analyses → result extraction
+    ↓
+results.json + run.json + validation/logs
+    ↓ upload
+HiStrA job server
+```
 
 ## Responsibility boundary
 
-The **server/model-generation side** is responsible for:
+The server is responsible for creating jobs, generating the base HRX, defining
+analysis order, scour values, requested outputs and validation policy.
 
-- bridge geometry, materials and load-position creation;
-- defining the ordered per-analysis scour scenario in `job.json`;
-- generating the base `.hrx` sent to the client;
-- deciding which analyses and result subsets are required.
+The client is responsible for downloading one attempt package, running the
+analysis sequence, applying foundation-interface scour mutation immediately
+before the relevant analysis, extracting the requested results and uploading
+the small result package.
 
-The **client runner** is responsible for:
+The network adapter does not contain HRX-generation or scenario-generation
+logic.
 
-- validating a self-contained job package;
-- staging the HRX in an isolated attempt workspace;
-- running the mesh and requested analyses;
-- applying the foundation-interface scour mutation before each analysis step;
-- resolving analysis dependencies through `InitialAnalysisKey`;
-- checking solver exit codes, HRX states and the results database;
-- extracting only the requested rows into JSON;
-- preserving logs, provenance and raw results until a later acknowledgement.
+## Features
 
-## Package layout
+- local `histra-runner` commands remain available without a server;
+- `histra-worker` registers the machine and pulls jobs over HTTPS;
+- configurable capacity: one job on colleague computers, four or more on a
+  dedicated computer;
+- package checksum verification and safe ZIP extraction;
+- attempt heartbeats while HiStrA is running;
+- connection loss does not terminate the solver;
+- completed local attempts are preserved and uploaded again after restart;
+- failed attempts are reported through the server failure endpoint;
+- result upload is retried without rerunning HiStrA;
+- server attempt IDs are preserved end to end;
+- raw output is deleted only when configured and only after server acceptance;
+- the existing scour functions and names are unchanged, including
+  `run_update_foundation_ifaces` and `update_foundation_interfaces`.
 
-```text
-histra-job-runner/
-├── pyproject.toml
-├── src/histra_runner/
-│   ├── cli.py          # validate, run and local parallel batch commands
-│   ├── config.py       # machine-specific TOML settings
-│   ├── schema.py       # job.json schema and package validation
-│   ├── hrx.py          # analysis selection, dependencies and completion evidence
-│   ├── scour.py        # per-analysis foundation-interface material mutation
-│   ├── solver.py       # local/PsExec process execution and targeted timeout cleanup
-│   ├── extraction.py   # read-only SQLite extraction without pandas
-│   ├── runner.py       # job lifecycle and workspace orchestration
-│   └── state.py        # durable state.json transitions
-├── examples/
-├── docs/
-└── tests/
+Authentication is intentionally not included yet.
+
+## Requirements
+
+- Windows;
+- Python 3.11 or later;
+- a working HiStrA `SolverHistra.exe` installation;
+- network access to `https://histra.bonatte.cloud`.
+
+## Install
+
+From the wheel:
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install .\histra_job_runner-0.3.0-py3-none-any.whl
 ```
 
-## Installation for development
+For development:
 
 ```powershell
 py -m venv .venv
@@ -57,12 +76,10 @@ python -m pip install -e ".[dev]"
 pytest
 ```
 
-The runtime package uses only the Python standard library. Python 3.11 or later
-is required.
+## Configure a computer
 
-## Configure one computer
-
-Copy `examples/runner.toml` and edit the solver path:
+Copy `examples/runner.toml` to a permanent location and edit the solver path,
+worker name and capacity.
 
 ```toml
 [solver]
@@ -75,91 +92,180 @@ close_without_ask = true
 workspace_root = './work'
 keep_raw_on_success = true
 keep_raw_on_failure = true
+
+[server]
+base_url = "https://histra.bonatte.cloud"
+verify_tls = true
+request_timeout_seconds = 30
+download_timeout_seconds = 180
+upload_timeout_seconds = 180
+retry_attempts = 5
+retry_backoff_seconds = 2
+maximum_package_bytes = 104857600
+
+[worker]
+name = "mauricio-desktop"
+max_parallel_jobs = 4
+spool_root = './spool'
+poll_seconds = 15
+heartbeat_seconds = 60
+worker_heartbeat_seconds = 60
+cleanup_package_on_accept = true
+cleanup_workspace_on_accept = false
+# solver_version = "2025.1.6"
+
+[worker.metadata]
+location = "home"
 ```
 
-Use `mode = "psexec"` and set `psexec_executable` only when that mode is truly
-needed. PsExec mode requires an elevated process.
+Recommended capacities:
 
-## Create a local job package
+```toml
+# colleague computer
+max_parallel_jobs = 1
 
-```text
-jobs/bridge-001/
-├── job.json
-└── model.hrx
+# your own computer
+max_parallel_jobs = 4
 ```
 
-The HRX is already prepared by the server/model-generation code. It must contain
-the mesh analysis and all requested analyses.
+`cleanup_workspace_on_accept = false` preserves the raw HiStrA output after the
+server accepts the result. Change it to `true` only when automatic deletion is
+desired.
 
-Example:
+## Check the live server
+
+The server exposes readiness at `/health/ready`.
+
+```powershell
+histra-worker check --config .\runner.toml
+```
+
+Expected output resembles:
 
 ```json
 {
-  "schema_version": "1.0",
-  "job_id": "bridge-001-scour-050",
-  "model": {
-    "path": "model.hrx",
-    "sha256": null
-  },
-  "mesh": {
-    "enabled": true,
-    "analysis_name": "StartMesh",
-    "timeout_seconds": 900
-  },
-  "scour": {
-    "foundation_interface_materials": ["Foundation_Soil", "Soil"],
-    "scoured_foundation_interface_material": "Soil_removed"
-  },
-  "analyses": [
-    {
-      "name": "Scour_1",
-      "timeout_seconds": 3600,
-      "interfaces": {
-        "pier_1": {"uniform": 0.20}
-      },
-      "outputs": {
-        "displacements": {"enabled": true, "all_steps": true, "model_point_ids": []},
-        "reactions": {"enabled": true, "all_steps": true},
-        "modal_contributions": {"enabled": false, "top_n": 3}
-      }
-    },
-    {
-      "name": "LiveLoad_1",
-      "timeout_seconds": 3600,
-      "outputs": {
-        "displacements": {
-          "enabled": true,
-          "all_steps": true,
-          "model_point_ids": [101, 205]
-        },
-        "reactions": {
-          "enabled": true,
-          "all_steps": true
-        },
-        "modal_contributions": {
-          "enabled": false,
-          "top_n": 3
-        }
-      }
-    }
-  ],
-  "validation": {
-    "require_completed_state": true,
-    "require_results_database": true,
-    "minimum_results_bytes": 1
-  },
-  "metadata": {
-    "scenario_id": "bridge-001-scour-050"
-  }
+  "status": "ready",
+  "version": "0.1.0"
 }
 ```
 
-`model.sha256` may be omitted or set to a real 64-character SHA-256 digest. It
-should be populated by the server in the network stage.
+## Register the computer
 
-## Per-analysis scour mutation
+```powershell
+histra-worker register --config .\runner.toml
+```
 
-Use the same names already used by the supplied automation code:
+Registration is idempotent by worker name. The returned worker ID is stored in:
+
+```text
+spool/worker.json
+```
+
+## Run the worker
+
+Process one polling batch and exit, which is useful for the first real test:
+
+```powershell
+histra-worker run --config .\runner.toml --once
+```
+
+Run continuously:
+
+```powershell
+histra-worker run --config .\runner.toml
+```
+
+Stop with `Ctrl+C`. The worker stops claiming new jobs and waits for currently
+running analyses to finish.
+
+## Network workflow
+
+For each claimed attempt, the worker performs:
+
+```text
+POST /api/v1/jobs/claim
+    ↓
+GET attempt package
+    ↓
+verify ZIP paths, job_id, attempt_id and HRX SHA-256
+    ↓
+run JobRunner locally
+    ↓ periodic heartbeat
+POST /api/v1/jobs/{job_id}/attempts/{attempt_id}/heartbeat
+    ↓
+upload results.json, run.json, validation.json and combined solver log
+    ↓
+POST /api/v1/jobs/{job_id}/attempts/{attempt_id}/results
+```
+
+If the local runner fails, the worker posts to the attempt's `/failed`
+endpoint. Retryability is retained in the local failure record.
+
+The claim request is deliberately not automatically retried. If a claim
+response is lost, retrying blindly could consume another server slot. Package
+download, heartbeats, result upload and failure reporting are safe to retry.
+
+## Recovery after interruption
+
+Network state is stored separately from the numerical workspace:
+
+```text
+spool/<job_id>/<attempt_id>/
+├── record.json
+├── package.zip
+├── package/
+├── validation.json
+└── solver.log
+```
+
+Numerical files remain under:
+
+```text
+work/<job_id>/<attempt_id>/
+├── state.json
+├── input/
+├── run/
+├── logs/
+└── output/
+```
+
+At startup the worker scans non-terminal spool records before claiming new
+jobs:
+
+- `output/run.json` exists and is completed: upload it again without rerunning;
+- `output/failure.json` exists: report it again;
+- package exists but execution never started: resume the attempt if the lease
+  is still active;
+- an incomplete workspace remains after a process/computer crash: report the
+  attempt as interrupted and allow the server retry policy to create a new
+  attempt;
+- server returns HTTP 409/404 for the attempt: mark the local record orphaned
+  and preserve it for diagnosis.
+
+## Local-only commands
+
+Validate a prepared package:
+
+```powershell
+histra-runner validate .\jobs\bridge-001\job.json --config .\runner.toml
+```
+
+Run one local package without the server:
+
+```powershell
+histra-runner run .\jobs\bridge-001\job.json --config .\runner.toml
+```
+
+Run a local batch:
+
+```powershell
+histra-runner run-batch .\jobs --config .\runner.toml --workers 4
+```
+
+## Scour mutation
+
+The server defines the per-analysis scour scenario in `job.json`; the client
+applies it between analyses. The existing names and modes remain:
 
 ```json
 {
@@ -174,101 +280,16 @@ Use the same names already used by the supplied automation code:
 }
 ```
 
-Supported modes remain `uniform`, `left`, `right`, `upstream` and
-`downstream`. A direct numeric value such as `"pier_2": 0.30` remains the
-backward-compatible shorthand for uniform scour.
+Supported modes are `uniform`, `left`, `right`, `upstream` and `downstream`.
+The numeric shorthand remains uniform scour. An analysis without an
+`interfaces` entry preserves the state left by the previous analysis.
 
-Before an analysis with a non-empty `interfaces` object, the runner calls
-`run_update_foundation_ifaces`. For each referenced pier it restores all bottom
-foundation interfaces to the first available material in
-`foundation_interface_materials`, then assigns
-`scoured_foundation_interface_material` to the selected interfaces. Analyses
-with no `interfaces` object preserve the interface state left by the preceding
-analysis. Therefore the order of the `analyses` list is significant.
-
-The applied interface keys and material names are written to both `run.json`
-and the corresponding entry in `results.json`.
-
-## Commands
-
-Validate without executing HiStrA:
+## Tests
 
 ```powershell
-histra-runner validate .\jobs\bridge-001\job.json
+pytest
 ```
 
-Validate the machine configuration too:
-
-```powershell
-histra-runner validate .\jobs\bridge-001\job.json --config .\runner.toml
-```
-
-Run one job:
-
-```powershell
-histra-runner run .\jobs\bridge-001\job.json --config .\runner.toml
-```
-
-Run multiple local jobs. Colleagues can use `--workers 1`; a dedicated machine
-can use a higher value such as `--workers 4`:
-
-```powershell
-histra-runner run-batch .\jobs --config .\runner.toml --workers 4
-```
-
-## Attempt workspace
-
-Each execution creates a unique directory:
-
-```text
-work/<job_id>/<attempt_id>/
-├── state.json
-├── input/
-│   ├── job.json
-│   └── model.hrx
-├── run/
-│   ├── model.hrx
-│   └── model.Results
-├── logs/
-│   ├── 000-StartMesh.stdout.log
-│   ├── 001-Vert.stdout.log
-│   ├── 002-LiveLoad_1.stdout.log
-│   └── ...
-└── output/
-    ├── results.json
-    └── run.json
-```
-
-On failure, the workspace also contains `output/failure.json` and
-`logs/traceback.log`. Raw files are retained by default so they can later be
-deleted only after the server accepts the upload.
-
-## Migration from the original scripts
-
-| Original module | Job-runner replacement |
-|---|---|
-| `run_program.py` | `solver.py` |
-| `run_scenario.py` | `runner.py` and durable attempt workspaces |
-| `extract_results.py` | `extraction.py` using `sqlite3` directly |
-| analysis-state helpers in `modelxml` | `hrx.py` |
-| printed status and swallowed exceptions | typed exceptions, `state.json`, `failure.json` |
-| hard-coded executable paths | machine-specific `runner.toml` |
-| global `taskkill /IM SolverHistra.exe` | targeted process-tree termination by PID |
-
-`build_scenarios.py`, material changes and load-position creation remain on the
-server/model-generation side. The scour scenario is also chosen on the server,
-but its HRX mutation is intentionally executed by this client immediately
-before each analysis. This preserves the sequential interface state required by
-HiStrA.
-
-## Network step later
-
-The future HTTPS layer should be a thin adapter:
-
-1. claim/download a package into a local inbox;
-2. call `JobRunner.run_job_file(...)`;
-3. upload `output/results.json`, `output/run.json` and selected logs;
-4. delete `run/` only after the server acknowledges the result.
-
-No solver, HRX, extraction or job-lifecycle code should need to change for that
-step.
+The tests cover the local numerical runner, scour mutation, schema validation,
+HTTP contract, non-retried claims, safe package extraction and a complete
+mocked claim-download-run-upload cycle.

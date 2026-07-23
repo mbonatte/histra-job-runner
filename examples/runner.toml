@@ -8,3 +8,27 @@ close_without_ask = true
 workspace_root = './work'
 keep_raw_on_success = true
 keep_raw_on_failure = true
+
+[server]
+base_url = "https://histra.bonatte.cloud"
+verify_tls = true
+request_timeout_seconds = 30
+download_timeout_seconds = 180
+upload_timeout_seconds = 180
+retry_attempts = 5
+retry_backoff_seconds = 2
+maximum_package_bytes = 104857600
+
+[worker]
+name = "mauricio-desktop"
+max_parallel_jobs = 4
+spool_root = './spool'
+poll_seconds = 15
+heartbeat_seconds = 60
+worker_heartbeat_seconds = 60
+cleanup_package_on_accept = true
+cleanup_workspace_on_accept = false
+# solver_version = "2025.1.6"
+
+[worker.metadata]
+location = "home"

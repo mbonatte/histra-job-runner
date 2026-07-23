@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 
 class HistraRunnerError(Exception):
@@ -22,6 +21,31 @@ class HrxValidationError(HistraRunnerError):
 
 
 class ResultExtractionError(HistraRunnerError):
+    pass
+
+
+class NetworkWorkerError(HistraRunnerError):
+    pass
+
+
+class ServerRequestError(NetworkWorkerError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        response_text: str | None = None,
+    ):
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_text = response_text
+
+
+class LeaseLostError(ServerRequestError):
+    """The server no longer considers an attempt active/current."""
+
+
+class PackageError(NetworkWorkerError):
     pass
 
 
