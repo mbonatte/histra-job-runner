@@ -8,6 +8,7 @@ import shutil
 import stat
 import zipfile
 
+from .contracts import validate_package_manifest
 from .errors import PackageError
 from .jsonio import read_json, utc_now_iso, write_json_atomic
 from .network import Claim
@@ -222,6 +223,11 @@ class AttemptSpool:
             raise
 
         job_path = destination / "job.json"
+        validate_package_manifest(
+            destination,
+            expected_job_id=record.claim.job_id,
+            expected_attempt_id=record.claim.attempt_id,
+        )
         spec = load_job_spec(job_path)
         if spec.job_id != record.claim.job_id:
             raise PackageError(

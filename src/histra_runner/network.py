@@ -64,7 +64,7 @@ class ServerClient:
         config: ServerConfig,
         *,
         client: httpx.Client | None = None,
-        user_agent: str = "histra-job-runner/0.3.0",
+        user_agent: str = "histra-job-runner/0.4.0",
     ):
         self.config = config
         self.config.validate()

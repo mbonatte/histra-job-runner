@@ -13,6 +13,12 @@ import shutil
 import time
 
 from .config import NetworkWorkerConfig
+from .contracts import (
+    RUNNER_CAPABILITIES,
+    RUNNER_VERSION,
+    SUPPORTED_JOB_SCHEMA_VERSIONS,
+    SUPPORTED_PACKAGE_PROTOCOLS,
+)
 from .errors import (
     JobRunError,
     LeaseLostError,
@@ -32,7 +38,7 @@ def _package_version() -> str:
     try:
         return version("histra-job-runner")
     except PackageNotFoundError:
-        return "0.3.0+source"
+        return f"{RUNNER_VERSION}+source
 
 
 def _read_json_object(path: Path) -> dict[str, Any] | None:
@@ -617,6 +623,20 @@ class NetworkWorker:
                 "running_jobs": running_jobs,
                 "workspace_root": str(self.config.runner.workspace_root),
                 "spool_root": str(self.config.worker.spool_root),
+                "protocol_versions": sorted(SUPPORTED_PACKAGE_PROTOCOLS),
+                "job_schema_versions": sorted(SUPPORTED_JOB_SCHEMA_VERSIONS),
+                "capabilities": sorted(
+                    set(RUNNER_CAPABILITIES)
+                    | {
+                        str(item)
+                        for item in (
+                            [metadata.get("capabilities")]
+                            if isinstance(metadata.get("capabilities"), str)
+                            else metadata.get("capabilities", [])
+                        )
+                        if str(item)
+                    }
+                ),
             }
         )
         return metadata
