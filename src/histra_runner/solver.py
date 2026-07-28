@@ -36,8 +36,7 @@ class SolverExecution:
 
 
 class SolverClient(Protocol):
-    def run(self, model_path: Path, timeout_seconds: float) -> SolverExecution:
-        ...
+    def run(self, model_path: Path, timeout_seconds: float) -> SolverExecution: ...
 
 
 def is_running_as_admin() -> bool:
@@ -67,15 +66,7 @@ class SubprocessSolver:
             if not is_running_as_admin():
                 raise SolverExecutionError(
                     "PsExec mode requires Administrator privileges.",
-                    FailedExecution(
-                        model_path=model_path,
-                        command=tuple(solver_args),
-                        return_code=None,
-                        stdout="",
-                        stderr="",
-                        timed_out=False,
-                        duration_seconds=0.0,
-                    ),
+                    FailedExecution(model_path, tuple(solver_args), None, "", "", False, 0.0),
                 )
             assert self.config.psexec_executable is not None
             return (
@@ -96,10 +87,7 @@ class SubprocessSolver:
         command = self.build_command(model_path)
         started_at = utc_now_iso()
         started = time.perf_counter()
-        creationflags = 0
-        if os.name == "nt":
-            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -116,49 +104,41 @@ class SubprocessSolver:
             stdout, stderr = process.communicate()
             duration = time.perf_counter() - started
             failed = FailedExecution(
-                model_path=model_path,
-                command=command,
-                return_code=process.returncode,
-                stdout=(exc.stdout or "") + (stdout or ""),
-                stderr=(exc.stderr or "") + (stderr or ""),
-                timed_out=True,
-                duration_seconds=duration,
+                model_path,
+                command,
+                process.returncode,
+                (exc.stdout or "") + (stdout or ""),
+                (exc.stderr or "") + (stderr or ""),
+                True,
+                duration,
             )
             raise SolverExecutionError(
                 f"Solver timed out after {timeout_seconds:g} seconds for {model_path.name}.",
                 failed,
             ) from exc
-
         duration = time.perf_counter() - started
-        finished_at = utc_now_iso()
-        stdout = stdout or ""
-        stderr = stderr or ""
+        stdout, stderr = stdout or "", stderr or ""
         if process.returncode != 0:
             failed = FailedExecution(
-                model_path=model_path,
-                command=command,
-                return_code=process.returncode,
-                stdout=stdout,
-                stderr=stderr,
-                timed_out=False,
-                duration_seconds=duration,
+                model_path, command, process.returncode, stdout, stderr, False, duration
             )
-            detail = "Solver returned a non-zero exit code"
-            if "StackOverflowException" in stderr:
-                detail = "Solver crashed with StackOverflowException"
+            detail = (
+                "Solver crashed with StackOverflowException"
+                if "StackOverflowException" in stderr
+                else "Solver returned a non-zero exit code"
+            )
             raise SolverExecutionError(
                 f"{detail} ({process.returncode}) for {model_path.name}.", failed
             )
-
         return SolverExecution(
-            model_path=model_path,
-            command=command,
-            started_at=started_at,
-            finished_at=finished_at,
-            duration_seconds=duration,
-            return_code=process.returncode,
-            stdout=stdout,
-            stderr=stderr,
+            model_path,
+            command,
+            started_at,
+            utc_now_iso(),
+            duration,
+            process.returncode,
+            stdout,
+            stderr,
         )
 
     @staticmethod

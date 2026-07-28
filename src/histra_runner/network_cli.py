@@ -17,12 +17,9 @@ def _parser() -> argparse.ArgumentParser:
         description="Pull and execute HiStrA jobs from a HiStrA job server.",
     )
     parser.add_argument(
-        "--log-level",
-        default="INFO",
-        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        "--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR")
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
-
     for name, help_text in (
         ("check", "Check server readiness and validate local configuration."),
         ("register", "Register or refresh this worker on the server."),
@@ -31,11 +28,7 @@ def _parser() -> argparse.ArgumentParser:
         command = subparsers.add_parser(name, help=help_text)
         command.add_argument("--config", type=Path, required=True)
         if name == "run":
-            command.add_argument(
-                "--once",
-                action="store_true",
-                help="Recover pending attempts and process one capacity-sized claim batch, then exit.",
-            )
+            command.add_argument("--once", action="store_true")
     return parser
 
 
@@ -49,13 +42,11 @@ def main(argv: list[str] | None = None) -> int:
         config = load_network_worker_config(args.config)
         with NetworkWorker(config) as worker:
             if args.command == "check":
-                response = worker.check_server()
-                print(json.dumps(response, indent=2))
+                print(json.dumps(worker.check_server(), indent=2))
                 print(f"CONFIG VALID: {args.config.resolve()}")
                 return 0
             if args.command == "register":
-                response = worker.register()
-                print(json.dumps(response, indent=2, default=str))
+                print(json.dumps(worker.register(), indent=2, default=str))
                 return 0
             if args.command == "run":
                 if args.once:
@@ -63,20 +54,12 @@ def main(argv: list[str] | None = None) -> int:
                     if not results:
                         print("NO JOBS")
                         return 0
-                    unsuccessful = False
                     for result in results:
                         print(
                             f"{result.local_status.upper()}: "
                             f"{result.job_id}/{result.attempt_id} -> {result.detail}"
                         )
-                        unsuccessful |= result.local_status in {
-                            "error",
-                            "network_pending",
-                            "completed_local",
-                            "failure_local",
-                            "orphaned",
-                        }
-                    return 1 if unsuccessful else 0
+                    return int(any(r.local_status != "accepted" for r in results))
                 worker.run_forever()
                 return 0
     except (HistraRunnerError, OSError, ValueError) as exc:

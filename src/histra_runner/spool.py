@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterator
-import json
 import shutil
 import stat
 import zipfile
@@ -13,7 +12,6 @@ from .errors import PackageError
 from .jsonio import read_json, utc_now_iso, write_json_atomic
 from .network import Claim
 from .schema import load_job_spec
-
 
 _TERMINAL_LOCAL_STATES = {"accepted", "failure_reported", "orphaned"}
 
@@ -54,12 +52,12 @@ class AttemptRecord:
         return self.directory / "package"
 
     @property
-    def job_path(self) -> Path:
-        return self.package_directory / "job.json"
+    def package_root(self) -> Path:  # compatibility alias
+        return self.package_directory
 
     @property
-    def accepted(self) -> bool:
-        return self.status == "accepted"
+    def job_path(self) -> Path:
+        return self.package_directory / "job.json"
 
     @property
     def terminal(self) -> bool:
@@ -77,7 +75,10 @@ class AttemptRecord:
             "details": self.details,
         }
 
-    def save(self) -> None:
+    def save(self, **details: Any) -> None:
+        if details:
+            self.details.update(details)
+            self.updated_at = utc_now_iso()
         self.directory.mkdir(parents=True, exist_ok=True)
         write_json_atomic(self.record_path, self.as_dict())
 
@@ -99,26 +100,10 @@ class AttemptRecord:
     ) -> "AttemptRecord":
         now = utc_now_iso()
         record = cls(
-            root=root.resolve(),
-            claim=claim,
-            worker_id=worker_id,
-            server_base_url=server_base_url.rstrip("/"),
-            status="claimed",
-            created_at=now,
-            updated_at=now,
-            details={},
+            root.resolve(), claim, worker_id, server_base_url.rstrip("/"), "claimed", now, now, {}
         )
         if record.record_path.exists():
-            existing = cls.load(record.record_path)
-            if (
-                existing.claim != claim
-                or existing.worker_id != worker_id
-                or existing.server_base_url.rstrip("/") != server_base_url.rstrip("/")
-            ):
-                raise PackageError(
-                    "Existing local attempt record does not match the server claim."
-                )
-            return existing
+            return cls.load(record.record_path)
         record.save()
         return record
 
@@ -126,10 +111,9 @@ class AttemptRecord:
     def load(cls, path: Path) -> "AttemptRecord":
         try:
             raw = read_json(path)
-            claim = Claim.from_dict(raw["claim"])
             record = cls(
                 root=path.resolve().parents[2],
-                claim=claim,
+                claim=Claim.from_dict(raw["claim"]),
                 worker_id=str(raw["worker_id"]),
                 server_base_url=str(raw["server_base_url"]),
                 status=str(raw["status"]),
@@ -140,7 +124,7 @@ class AttemptRecord:
         except Exception as exc:
             raise PackageError(f"Could not read attempt record {path}: {exc}") from exc
         if record.record_path != path.resolve():
-            raise PackageError(f"Attempt record path does not match its job and attempt IDs: {path}")
+            raise PackageError(f"Attempt record path does not match its IDs: {path}")
         return record
 
 
@@ -151,10 +135,7 @@ class AttemptSpool:
 
     def create(self, claim: Claim, *, worker_id: str, server_base_url: str) -> AttemptRecord:
         return AttemptRecord.create(
-            self.root,
-            claim,
-            worker_id=worker_id,
-            server_base_url=server_base_url,
+            self.root, claim, worker_id=worker_id, server_base_url=server_base_url
         )
 
     def records(self, *, include_terminal: bool = False) -> Iterator[AttemptRecord]:
@@ -165,58 +146,41 @@ class AttemptSpool:
 
     @staticmethod
     def extract_package(record: AttemptRecord, *, maximum_bytes: int) -> Path:
-        archive_path = record.package_zip
-        if not archive_path.is_file():
-            raise PackageError(f"Downloaded package is missing: {archive_path}")
+        if not record.package_zip.is_file():
+            raise PackageError(f"Downloaded package is missing: {record.package_zip}")
         destination = record.package_directory
         shutil.rmtree(destination, ignore_errors=True)
         destination.mkdir(parents=True, exist_ok=False)
         total = 0
         try:
-            with zipfile.ZipFile(archive_path) as archive:
-                seen_names: set[str] = set()
+            with zipfile.ZipFile(record.package_zip) as archive:
+                seen: set[str] = set()
                 for member in archive.infolist():
-                    name = member.filename.replace("\\", "/")
-                    relative = PurePosixPath(name)
-                    canonical_name = "/".join(relative.parts).casefold()
+                    relative = PurePosixPath(member.filename.replace("\\", "/"))
+                    canonical = "/".join(relative.parts).casefold()
                     if (
                         relative.is_absolute()
                         or not relative.parts
-                        or any(
-                            part in {"", ".", ".."} or ":" in part
-                            for part in relative.parts
-                        )
+                        or any(part in {"", ".", ".."} or ":" in part for part in relative.parts)
                     ):
                         raise PackageError(f"Unsafe path in job package: {member.filename!r}")
-                    if canonical_name in seen_names:
-                        raise PackageError(
-                            f"Duplicate path in job package: {member.filename!r}"
-                        )
-                    seen_names.add(canonical_name)
-                    mode = member.external_attr >> 16
-                    if stat.S_ISLNK(mode):
-                        raise PackageError(
-                            f"Symbolic links are not allowed in job packages: {member.filename!r}"
-                        )
+                    if canonical in seen:
+                        raise PackageError(f"Duplicate path in job package: {member.filename!r}")
+                    seen.add(canonical)
+                    if stat.S_ISLNK(member.external_attr >> 16):
+                        raise PackageError("Symbolic links are not allowed in job packages.")
                     if member.file_size < 0 or total + member.file_size > maximum_bytes:
-                        raise PackageError(
-                            "Uncompressed job package exceeds configured maximum_package_bytes."
-                        )
+                        raise PackageError("Uncompressed job package exceeds configured limit.")
                     target = destination.joinpath(*relative.parts)
                     if member.is_dir():
                         target.mkdir(parents=True, exist_ok=True)
                         continue
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    with archive.open(member, "r") as source, target.open("wb") as output:
-                        while True:
-                            chunk = source.read(64 * 1024)
-                            if not chunk:
-                                break
+                    with archive.open(member) as source, target.open("wb") as output:
+                        while chunk := source.read(64 * 1024):
                             total += len(chunk)
                             if total > maximum_bytes:
-                                raise PackageError(
-                                    "Uncompressed job package exceeds configured maximum_package_bytes."
-                                )
+                                raise PackageError("Uncompressed job package exceeds configured limit.")
                             output.write(chunk)
         except Exception:
             shutil.rmtree(destination, ignore_errors=True)
@@ -229,14 +193,8 @@ class AttemptSpool:
             expected_attempt_id=record.claim.attempt_id,
         )
         spec = load_job_spec(job_path)
-        if spec.job_id != record.claim.job_id:
-            raise PackageError(
-                f"Downloaded job_id {spec.job_id!r} does not match claim {record.claim.job_id!r}."
-            )
-        if spec.attempt_id != record.claim.attempt_id:
-            raise PackageError(
-                "Downloaded attempt_id does not match the claimed server attempt."
-            )
+        if spec.job_id != record.claim.job_id or spec.attempt_id != record.claim.attempt_id:
+            raise PackageError("Downloaded package identity does not match the server claim.")
         spec.validate_package(destination, verify_hash=True)
         record.transition("downloaded", package_uncompressed_bytes=total)
         return job_path

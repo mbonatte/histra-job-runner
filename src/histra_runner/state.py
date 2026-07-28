@@ -1,35 +1,25 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
-from .jsonio import utc_now_iso, write_json_atomic
+from .jsonio import read_json, utc_now_iso, write_json_atomic
 
 
-@dataclass
 class StateStore:
-    path: Path
-    job_id: str
-    attempt_id: str
-    current: str = "received"
-    history: list[dict[str, Any]] = field(default_factory=list)
+    def __init__(self, path: Path, job_id: str, attempt_id: str):
+        self.path = path
+        self.data = {
+            "job_id": job_id,
+            "attempt_id": attempt_id,
+            "state": "created",
+            "updated_at": utc_now_iso(),
+            "history": [],
+        }
+        write_json_atomic(path, self.data)
 
-    def __post_init__(self) -> None:
-        self.transition(self.current)
-
-    def transition(self, state: str, **details: Any) -> None:
-        self.current = state
-        event = {"state": state, "at": utc_now_iso()}
-        if details:
-            event["details"] = details
-        self.history.append(event)
-        write_json_atomic(
-            self.path,
-            {
-                "job_id": self.job_id,
-                "attempt_id": self.attempt_id,
-                "state": self.current,
-                "history": self.history,
-            },
-        )
+    def transition(self, state: str, **details: object) -> None:
+        event = {"state": state, "at": utc_now_iso(), **details}
+        self.data["state"] = state
+        self.data["updated_at"] = event["at"]
+        self.data["history"].append(event)
+        write_json_atomic(self.path, self.data)

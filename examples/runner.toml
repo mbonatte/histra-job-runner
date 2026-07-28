@@ -1,11 +1,11 @@
 [solver]
-executable = '.\histra\SolverHistra.exe'
+executable = 'C:\Program Files\Gruppo Sismica\HiStrA Bridges 2025.1.6\SolverHistra.exe'
 mode = "local"
 process_name = "SolverHistra.exe"
 close_without_ask = true
 
 [runner]
-workspace_root = './work'
+workspace_root = "./work"
 keep_raw_on_success = true
 keep_raw_on_failure = true
 
@@ -20,15 +20,14 @@ retry_backoff_seconds = 2
 maximum_package_bytes = 104857600
 
 [worker]
-name = "mauricio-desktop"
-max_parallel_jobs = 4
-spool_root = './spool'
+name = "my-histra-worker"
+max_parallel_jobs = 1
+spool_root = "./spool"
 poll_seconds = 15
 heartbeat_seconds = 60
 worker_heartbeat_seconds = 60
 cleanup_package_on_accept = true
 cleanup_workspace_on_accept = false
-# solver_version = "2025.1.6"
 
 [worker.metadata]
-location = "home"
+location = "office"

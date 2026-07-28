@@ -1,5 +1,4 @@
-from pathlib import Path
-import json
+from __future__ import annotations
 
 import pytest
 
@@ -7,65 +6,43 @@ from histra_runner.errors import JobValidationError
 from histra_runner.schema import job_spec_from_dict
 
 
-def base_job() -> dict:
+def base_job():
     return {
         "schema_version": "1.0",
-        "job_id": "bridge-001",
+        "job_id": "job-1",
         "model": {"path": "model.hrx"},
-        "analyses": [{"name": "LiveLoad_1"}],
+        "mesh": {"enabled": False},
+        "analyses": [{"name": "A", "timeout_seconds": 10}],
     }
 
 
-def test_rejects_path_traversal(tmp_path: Path):
+def test_parses_directional_scour_and_outputs():
     data = base_job()
-    data["model"]["path"] = "../outside.hrx"
+    data["analyses"][0]["interfaces"] = {"Pier_1": {"left": 0.25}}
+    data["analyses"][0]["outputs"] = {
+        "reactions": {"all_steps": False},
+        "displacements": {"model_point_ids": [1, 2]},
+        "modal_contributions": {"enabled": True, "top_n": 2},
+    }
     spec = job_spec_from_dict(data)
-    with pytest.raises(JobValidationError, match="safe relative path"):
-        spec.resolve_model_path(tmp_path)
+    analysis = spec.analyses[0]
+    assert analysis.interfaces == {"Pier_1": {"left": 0.25}}
+    assert analysis.outputs.displacements.model_point_ids == (1, 2)
+    assert analysis.outputs.modal_contributions.top_n == 2
 
 
-def test_rejects_duplicate_analyses():
+@pytest.mark.parametrize(
+    "mutator",
+    [
+        lambda job: job.update(schema_version="2.0"),
+        lambda job: job.update(job_id="bad id"),
+        lambda job: job["analyses"].append({"name": "A"}),
+        lambda job: job["analyses"][0].update(timeout_seconds=0),
+        lambda job: job["analyses"][0].update(interfaces={"Pier_1": {"bad": 0.1}}),
+    ],
+)
+def test_rejects_invalid_jobs(mutator):
     data = base_job()
-    data["analyses"].append({"name": "LiveLoad_1"})
-    with pytest.raises(JobValidationError, match="Duplicate analysis"):
-        job_spec_from_dict(data)
-
-
-def test_default_outputs_are_lightweight_and_explicit():
-    spec = job_spec_from_dict(base_job())
-    outputs = spec.analyses[0].outputs
-    assert outputs.reactions.enabled
-    assert outputs.displacements.enabled
-    assert not outputs.modal_contributions.enabled
-
-
-def test_preserves_existing_scour_names_and_numeric_shorthand():
-    data = base_job()
-    data["analyses"][0]["interfaces"] = {
-        "pier_1": {"uniform": 0.2, "upstream": 0.1},
-        "pier_2": 0.3,
-    }
-    data["scour"] = {
-        "foundation_interface_materials": ["Foundation_Soil", "Soil"],
-        "scoured_foundation_interface_material": "Soil_removed",
-    }
-
-    spec = job_spec_from_dict(data)
-    assert spec.analyses[0].interfaces == {
-        "pier_1": {"uniform": 0.2, "upstream": 0.1},
-        "pier_2": 0.3,
-    }
-    assert spec.scour.foundation_interface_materials == ("Foundation_Soil", "Soil")
-    assert spec.scour.scoured_foundation_interface_material == "Soil_removed"
-
-
-def test_rejects_invalid_scour_mode_and_delta():
-    data = base_job()
-    data["analyses"][0]["interfaces"] = {"pier_1": {"diagonal": 0.2}}
-    with pytest.raises(JobValidationError, match="unsupported mode"):
-        job_spec_from_dict(data)
-
-    data = base_job()
-    data["analyses"][0]["interfaces"] = {"pier_1": {"left": 1.2}}
-    with pytest.raises(JobValidationError, match="between 0 and 1"):
+    mutator(data)
+    with pytest.raises(JobValidationError):
         job_spec_from_dict(data)

@@ -1,24 +1,10 @@
 # Changelog
 
-## 0.3.0
+## 0.4.0
 
-- Added the HTTPS pull-worker adapter.
-- Added worker registration, worker heartbeat, atomic claim handling, package
-  download, attempt heartbeats, result upload and failure reporting.
-- Added safe ZIP extraction, HRX checksum verification and package-size limits.
-- Added durable spool records and restart recovery without rerunning completed
-  attempts.
-- Added configurable parallel capacity and continuous/one-shot worker modes.
-- Added `histra-worker` CLI and configuration for
-  `https://histra.bonatte.cloud`.
-- Preserved the network-independent `JobRunner` public API and existing scour
-  mutation names/behaviour.
-- Added network and end-to-end mocked worker tests.
-
-## 0.2.0
-
-- Added per-analysis foundation-interface scour mutation on the client side.
-
-## 0.1.0
-
-- Initial local job-runner package.
+- Add the backend-neutral `SolverBackend` protocol and immutable request/result types.
+- Add `CSharpBackend`, preserving the existing `SolverHistra.exe` subprocess workflow.
+- Refactor `JobRunner` so it owns workspace/package lifecycle while the backend owns numerical execution, HRX mutation, validation, and result extraction.
+- Preserve the legacy `JobRunner(config, solver=...)` injection path for compatibility.
+- Record the selected backend in state and run manifests.
+- Add regression tests for C# execution ordering, result shape, mutation persistence, and custom backend injection.

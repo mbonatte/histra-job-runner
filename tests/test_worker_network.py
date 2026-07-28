@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
 import hashlib
 import json
 import zipfile
-from io import BytesIO
 
 import httpx
 
@@ -28,10 +28,7 @@ def _package_bytes() -> bytes:
         "schema_version": "1.0",
         "job_id": "job-1",
         "attempt_id": "attempt-1",
-        "model": {
-            "path": "model.hrx",
-            "sha256": hashlib.sha256(model).hexdigest(),
-        },
+        "model": {"path": "model.hrx", "sha256": hashlib.sha256(model).hexdigest()},
         "analyses": [{"name": "Analysis-1"}],
     }
     buffer = BytesIO()
@@ -51,10 +48,7 @@ class FakeRunner:
         workspace = self.workspace_root / spec.job_id / spec.attempt_id
         (workspace / "output").mkdir(parents=True)
         (workspace / "logs").mkdir()
-        write_json_atomic(
-            workspace / "state.json",
-            {"state": "completed", "history": []},
-        )
+        write_json_atomic(workspace / "state.json", {"state": "completed", "history": []})
         results = workspace / "output" / "results.json"
         run = workspace / "output" / "run.json"
         write_json_atomic(
@@ -89,7 +83,7 @@ def test_network_worker_downloads_runs_and_uploads(tmp_path: Path) -> None:
         nonlocal claimed, uploaded
         path = request.url.path
         if path == "/health/ready":
-            return httpx.Response(200, json={"status": "ready", "version": "0.1.0"})
+            return httpx.Response(200, json={"status": "ready"})
         if path == "/api/v1/workers/register":
             return httpx.Response(200, json={"id": "worker-1", "enabled": True})
         if path == "/api/v1/jobs/claim":
@@ -114,8 +108,7 @@ def test_network_worker_downloads_runs_and_uploads(tmp_path: Path) -> None:
             return httpx.Response(200, json={"status": "running"})
         if path == "/results":
             body = request.read()
-            assert b'results.json' in body
-            assert b'run.json' in body
+            assert b"results.json" in body and b"run.json" in body
             uploaded = True
             return httpx.Response(200, json={"status": "completed"})
         raise AssertionError(path)
@@ -126,10 +119,7 @@ def test_network_worker_downloads_runs_and_uploads(tmp_path: Path) -> None:
             solver=SolverConfig(executable=tmp_path / "missing.exe"),
             workspace_root=workspace_root,
         ),
-        server=ServerConfig(
-            base_url="https://example.test",
-            retry_backoff_seconds=0,
-        ),
+        server=ServerConfig(base_url="https://example.test", retry_backoff_seconds=0),
         worker=WorkerConfig(
             name="test-worker",
             max_parallel_jobs=1,
@@ -137,17 +127,18 @@ def test_network_worker_downloads_runs_and_uploads(tmp_path: Path) -> None:
             heartbeat_seconds=0.01,
         ),
     )
-    http_client = httpx.Client(transport=httpx.MockTransport(handler))
-    server_client = ServerClient(config.server, client=http_client)
+    server_client = ServerClient(
+        config.server, client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
     with NetworkWorker(
         config,
         client=server_client,
         runner_factory=lambda: FakeRunner(workspace_root),
     ) as worker:
         results = worker.run_once()
+
     assert uploaded is True
-    assert len(results) == 1
-    assert results[0].local_status == "accepted"
+    assert len(results) == 1 and results[0].local_status == "accepted"
     record = json.loads(
         (tmp_path / "spool" / "job-1" / "attempt-1" / "record.json").read_text()
     )

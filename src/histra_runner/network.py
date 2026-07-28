@@ -82,7 +82,7 @@ class ServerClient:
     def __enter__(self) -> "ServerClient":
         return self
 
-    def __exit__(self, exc_type, exc, traceback) -> None:
+    def __exit__(self, *_: object) -> None:
         self.close()
 
     def resolve_url(self, path_or_url: str) -> str:
@@ -139,15 +139,14 @@ class ServerClient:
                     timeout=timeout or self.config.request_timeout_seconds,
                     **kwargs,
                 )
-                if retry and response.status_code in {429, 502, 503, 504} and index + 1 < attempts:
+                if (
+                    retry
+                    and response.status_code in {429, 502, 503, 504}
+                    and index + 1 < attempts
+                ):
                     delay = self.config.retry_backoff_seconds * (2**index)
-                    logger.warning(
-                        "Temporary HTTP %s from %s; retrying in %.1fs",
-                        response.status_code,
-                        url,
-                        delay,
-                    )
-                    time.sleep(delay)
+                    if delay:
+                        time.sleep(delay)
                     continue
                 self._raise_for_response(response, lease_sensitive=lease_sensitive)
                 return response
@@ -156,8 +155,8 @@ class ServerClient:
                 if index + 1 >= attempts:
                     break
                 delay = self.config.retry_backoff_seconds * (2**index)
-                logger.warning("Network error calling %s; retrying in %.1fs: %s", url, delay, exc)
-                time.sleep(delay)
+                if delay:
+                    time.sleep(delay)
         raise ServerRequestError(f"Could not reach {url}: {last_error}") from last_error
 
     def ready(self) -> dict[str, Any]:
@@ -172,15 +171,17 @@ class ServerClient:
         solver_version: str | None,
         metadata: dict[str, Any],
     ) -> dict[str, Any]:
-        payload = {
-            "name": name,
-            "max_parallel_jobs": max_parallel_jobs,
-            "worker_version": worker_version,
-            "solver_version": solver_version,
-            "metadata": metadata,
-        }
         return self._request(
-            "POST", "/api/v1/workers/register", json=payload, retry=True
+            "POST",
+            "/api/v1/workers/register",
+            json={
+                "name": name,
+                "max_parallel_jobs": max_parallel_jobs,
+                "worker_version": worker_version,
+                "solver_version": solver_version,
+                "metadata": metadata,
+            },
+            retry=True,
         ).json()
 
     def worker_heartbeat(
@@ -192,22 +193,20 @@ class ServerClient:
         solver_version: str | None,
         metadata: dict[str, Any],
     ) -> dict[str, Any]:
-        payload = {
-            "max_parallel_jobs": max_parallel_jobs,
-            "worker_version": worker_version,
-            "solver_version": solver_version,
-            "metadata": metadata,
-        }
         return self._request(
             "POST",
             f"/api/v1/workers/{worker_id}/heartbeat",
-            json=payload,
+            json={
+                "max_parallel_jobs": max_parallel_jobs,
+                "worker_version": worker_version,
+                "solver_version": solver_version,
+                "metadata": metadata,
+            },
             retry=False,
         ).json()
 
     def claim(self, worker_id: str) -> Claim | None:
-        # Claim is intentionally not retried. A lost response may already have
-        # leased a job, and a blind retry could consume another worker slot.
+        # Intentionally not retried: a lost response may already have leased a job.
         response = self._request(
             "POST",
             "/api/v1/jobs/claim",
@@ -239,40 +238,18 @@ class ServerClient:
         temporary = destination.with_name(f".{destination.name}.part")
         url = self.resolve_url(claim.package_url)
         last_error: Exception | None = None
-
         for index in range(self.config.retry_attempts):
             temporary.unlink(missing_ok=True)
             try:
                 with self._client.stream(
-                    "GET",
-                    url,
-                    timeout=self.config.download_timeout_seconds,
+                    "GET", url, timeout=self.config.download_timeout_seconds
                 ) as response:
-                    if (
-                        response.status_code in {429, 502, 503, 504}
-                        and index + 1 < self.config.retry_attempts
-                    ):
-                        delay = self.config.retry_backoff_seconds * (2**index)
-                        logger.warning(
-                            "Temporary HTTP %s while downloading package; retrying in %.1fs",
-                            response.status_code,
-                            delay,
-                        )
-                        time.sleep(delay)
-                        continue
                     self._raise_for_response(response, lease_sensitive=True)
-                    content_length = response.headers.get("content-length")
-                    if content_length:
-                        try:
-                            announced_size = int(content_length)
-                        except ValueError as exc:
-                            raise ServerRequestError(
-                                "Server returned an invalid package Content-Length header."
-                            ) from exc
-                        if announced_size > self.config.maximum_package_bytes:
-                            raise ServerRequestError(
-                                "Job package exceeds configured maximum_package_bytes."
-                            )
+                    announced = response.headers.get("content-length")
+                    if announced and int(announced) > self.config.maximum_package_bytes:
+                        raise ServerRequestError(
+                            "Job package exceeds configured maximum_package_bytes."
+                        )
                     size = 0
                     with temporary.open("wb") as handle:
                         for chunk in response.iter_bytes():
@@ -287,17 +264,17 @@ class ServerClient:
             except LeaseLostError:
                 temporary.unlink(missing_ok=True)
                 raise
-            except (httpx.RequestError, OSError) as exc:
+            except (httpx.RequestError, OSError, ValueError) as exc:
                 last_error = exc
                 temporary.unlink(missing_ok=True)
                 if index + 1 >= self.config.retry_attempts:
                     break
                 delay = self.config.retry_backoff_seconds * (2**index)
-                logger.warning(
-                    "Package download failed; retrying in %.1fs: %s", delay, exc
-                )
-                time.sleep(delay)
-        raise ServerRequestError(f"Could not download package from {url}: {last_error}") from last_error
+                if delay:
+                    time.sleep(delay)
+        raise ServerRequestError(
+            f"Could not download package from {url}: {last_error}"
+        ) from last_error
 
     def upload_results(
         self,
@@ -309,12 +286,8 @@ class ServerClient:
         solver_log_path: Path | None = None,
         extractor_log_path: Path | None = None,
     ) -> dict[str, Any]:
-        file_specs: dict[str, tuple[str, bytes, str]] = {
-            "results_file": (
-                "results.json",
-                results_path.read_bytes(),
-                "application/json",
-            ),
+        files: dict[str, tuple[str, bytes, str]] = {
+            "results_file": ("results.json", results_path.read_bytes(), "application/json"),
             "run_file": ("run.json", run_path.read_bytes(), "application/json"),
         }
         optional = (
@@ -324,11 +297,11 @@ class ServerClient:
         )
         for field, path, filename, content_type in optional:
             if path is not None and path.is_file():
-                file_specs[field] = (filename, path.read_bytes(), content_type)
+                files[field] = (filename, path.read_bytes(), content_type)
         return self._request(
             "POST",
             claim.results_url,
-            files=file_specs,
+            files=files,
             retry=True,
             lease_sensitive=True,
             timeout=self.config.upload_timeout_seconds,
@@ -344,17 +317,16 @@ class ServerClient:
         run: dict[str, Any] | None,
         validation: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        payload = {
-            "reason": reason[:10_000],
-            "retryable": retryable,
-            "exit_code": exit_code,
-            "run": run,
-            "validation": validation,
-        }
         return self._request(
             "POST",
             claim.failure_url,
-            json=payload,
+            json={
+                "reason": reason[:10_000],
+                "retryable": retryable,
+                "exit_code": exit_code,
+                "run": run,
+                "validation": validation,
+            },
             retry=True,
             lease_sensitive=True,
         ).json()

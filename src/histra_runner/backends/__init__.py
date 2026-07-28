@@ -1,19 +1,14 @@
-"""HiStrA job runner public API."""
-from .backends import (
+from .csharp import CSharpBackend
+from .protocol import (
     AnalysisJobResult,
     AnalysisPlan,
     AnalysisPlanItem,
     BackendExecution,
-    CSharpBackend,
     MutationSchedule,
     OutputRequest,
     SolverBackend,
     SolverJobResult,
 )
-from .contracts import RUNNER_VERSION
-from .runner import JobRunner, RunOutcome
-
-__version__ = RUNNER_VERSION
 
 __all__ = [
     "AnalysisJobResult",
@@ -21,11 +16,8 @@ __all__ = [
     "AnalysisPlanItem",
     "BackendExecution",
     "CSharpBackend",
-    "JobRunner",
     "MutationSchedule",
     "OutputRequest",
-    "RunOutcome",
     "SolverBackend",
     "SolverJobResult",
-    "__version__",
 ]

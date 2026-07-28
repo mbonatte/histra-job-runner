@@ -1,5 +1,4 @@
 """Runner-side validation for immutable JOBs and disposable packages."""
-
 from __future__ import annotations
 
 import hashlib
@@ -10,7 +9,6 @@ from typing import Any
 from .errors import PackageError
 from .jsonio import read_json
 
-
 RUNNER_VERSION = "0.4.0"
 SUPPORTED_PACKAGE_PROTOCOLS = {"1.1"}
 SUPPORTED_JOB_SCHEMA_VERSIONS = {"1.0"}
@@ -20,6 +18,8 @@ RUNNER_CAPABILITIES = {
     "displacement-results",
     "reaction-history",
     "modal-contributions",
+    "solver-backend-protocol",
+    "csharp-backend",
 }
 
 
@@ -69,8 +69,6 @@ def validate_package_manifest(
     expected_job_id: str,
     expected_attempt_id: str,
 ) -> dict[str, Any]:
-    """Validate the JOB identity and generated HRX before execution."""
-
     manifest_path = package_root / "manifest.json"
     if not manifest_path.is_file():
         return {
@@ -78,7 +76,6 @@ def validate_package_manifest(
             "protocol_version": "legacy-1.0",
             "validated": False,
         }
-
     try:
         manifest = read_json(manifest_path)
         job = read_json(package_root / "job.json")
@@ -86,7 +83,6 @@ def validate_package_manifest(
         raise PackageError(f"Could not read package manifest: {exc}") from exc
     if not isinstance(manifest, dict) or not isinstance(job, dict):
         raise PackageError("manifest.json and job.json must contain JSON objects.")
-
     if str(manifest.get("manifest_version")) != "1.0":
         raise PackageError("Unsupported package manifest version.")
     protocol = _required_text(manifest, "protocol_version")
@@ -100,42 +96,25 @@ def validate_package_manifest(
         raise PackageError("job.json job_id does not match the server claim.")
     if str(job.get("attempt_id")) != expected_attempt_id:
         raise PackageError("job.json attempt_id does not match the server claim.")
-
-    schema = str(job.get("schema_version", ""))
-    if schema not in SUPPORTED_JOB_SCHEMA_VERSIONS:
-        raise PackageError(f"Unsupported JOB schema {schema!r}.")
-    if str(manifest.get("job_schema_version")) != schema:
-        raise PackageError("Manifest and JOB schema versions do not match.")
-
-    expected_job_hash = _required_text(manifest, "job_sha256").lower()
-    if job_sha256(job) != expected_job_hash:
-        raise PackageError("job.json does not match the immutable server JOB hash.")
-
-    model = job.get("model")
-    if not isinstance(model, dict):
-        raise PackageError("job.json model must be an object.")
-    hrx_path = _required_text(manifest, "hrx_path")
-    relative_hrx = PurePosixPath(hrx_path.replace("\\", "/"))
-    if relative_hrx.is_absolute() or len(relative_hrx.parts) != 1:
-        raise PackageError("Manifest HRX path must be a package-root filename.")
-    if relative_hrx.name in {"", ".", ".."}:
-        raise PackageError("Manifest HRX path is unsafe.")
-    if str(model.get("path")) != hrx_path:
-        raise PackageError("Manifest HRX path does not match job.json model.path.")
-
-    generated_hrx = package_root / relative_hrx.name
-    if not generated_hrx.is_file():
-        raise PackageError(f"Generated HRX is missing from package: {hrx_path}")
-    actual_hrx_hash = file_sha256(generated_hrx)
-    if actual_hrx_hash != _required_text(manifest, "hrx_sha256").lower():
-        raise PackageError("Generated HRX hash does not match manifest.json.")
+    if str(manifest.get("job_schema_version")) not in SUPPORTED_JOB_SCHEMA_VERSIONS:
+        raise PackageError("Unsupported job schema version in package manifest.")
+    expected_job_hash = _required_text(manifest, "job_sha256")
+    actual_job_hash = job_sha256(job)
+    if actual_job_hash != expected_job_hash:
+        raise PackageError("Package contains a modified immutable server JOB.")
+    raw_hrx_path = _required_text(manifest, "hrx_path")
+    relative = PurePosixPath(raw_hrx_path.replace("\\", "/"))
+    if relative.is_absolute() or ".." in relative.parts:
+        raise PackageError("Package HRX path is unsafe.")
+    hrx_path = (package_root / Path(*relative.parts)).resolve()
     try:
-        expected_hrx_size = int(manifest.get("hrx_size_bytes", -1))
-    except (TypeError, ValueError) as exc:
-        raise PackageError("Manifest HRX size must be an integer.") from exc
-    if generated_hrx.stat().st_size != expected_hrx_size:
-        raise PackageError("Generated HRX size does not match manifest.json.")
-
-    result = dict(manifest)
-    result["validated"] = True
-    return result
+        hrx_path.relative_to(package_root.resolve())
+    except ValueError as exc:
+        raise PackageError("Package HRX path escapes the package root.") from exc
+    if not hrx_path.is_file():
+        raise PackageError(f"Package HRX was not found: {hrx_path}")
+    expected_hrx_hash = _required_text(manifest, "hrx_sha256")
+    actual_hrx_hash = file_sha256(hrx_path)
+    if actual_hrx_hash != expected_hrx_hash:
+        raise PackageError("Package HRX hash does not match the manifest.")
+    return {**manifest, "validated": True}

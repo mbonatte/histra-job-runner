@@ -83,6 +83,7 @@ def select_only_analysis(path: Path, analysis_name: str) -> None:
     by the next analysis, so only non-completed, non-selected analyses are
     switched off.
     """
+
     encoding = detect_xml_encoding(path)
     root = read_hrx(path)
     by_name = analyses_by_name(root)
@@ -159,11 +160,11 @@ def analysis_evidence(path: Path, analysis_name: str) -> dict:
 
 def dependency_order(path: Path, requested_names: Iterable[str]) -> list[str]:
     """Return required analyses before dependants, without duplicates."""
+
     root = read_hrx(path)
     by_name = analyses_by_name(root)
     by_key = analyses_by_key(root)
     ordered: OrderedDict[str, None] = OrderedDict()
-
     requested_set = set(requested_names)
 
     def visit(name: str, stack: tuple[str, ...], *, explicitly_requested: bool) -> None:

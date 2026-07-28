@@ -38,8 +38,14 @@ class RunnerConfig:
     keep_raw_on_success: bool = True
     keep_raw_on_failure: bool = True
 
-    def validate(self, *, require_solver_files: bool = True) -> None:
-        self.solver.validate(require_files=require_solver_files)
+    def validate(
+        self,
+        *,
+        require_solver_files: bool = True,
+        validate_solver: bool = True,
+    ) -> None:
+        if validate_solver:
+            self.solver.validate(require_files=require_solver_files)
         self.workspace_root.mkdir(parents=True, exist_ok=True)
         if not self.workspace_root.is_dir():
             raise ConfigurationError(f"Workspace root is not a directory: {self.workspace_root}")
@@ -59,17 +65,11 @@ class ServerConfig:
     def validate(self) -> None:
         parsed = urlparse(self.base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ConfigurationError(
-                "server.base_url must be an absolute http:// or https:// URL."
-            )
+            raise ConfigurationError("server.base_url must be an absolute http:// or https:// URL.")
         if parsed.query or parsed.fragment:
             raise ConfigurationError("server.base_url must not contain a query or fragment.")
-        if self.request_timeout_seconds <= 0:
-            raise ConfigurationError("server.request_timeout_seconds must be positive.")
-        if self.download_timeout_seconds <= 0:
-            raise ConfigurationError("server.download_timeout_seconds must be positive.")
-        if self.upload_timeout_seconds <= 0:
-            raise ConfigurationError("server.upload_timeout_seconds must be positive.")
+        if min(self.request_timeout_seconds, self.download_timeout_seconds, self.upload_timeout_seconds) <= 0:
+            raise ConfigurationError("Server timeouts must be positive.")
         if self.retry_attempts < 1:
             raise ConfigurationError("server.retry_attempts must be at least 1.")
         if self.retry_backoff_seconds < 0:
@@ -96,17 +96,11 @@ class WorkerConfig:
             raise ConfigurationError("worker.name must not be empty.")
         if not 1 <= self.max_parallel_jobs <= 64:
             raise ConfigurationError("worker.max_parallel_jobs must be between 1 and 64.")
-        if self.poll_seconds <= 0:
-            raise ConfigurationError("worker.poll_seconds must be positive.")
-        if self.heartbeat_seconds <= 0:
-            raise ConfigurationError("worker.heartbeat_seconds must be positive.")
-        if self.worker_heartbeat_seconds <= 0:
-            raise ConfigurationError("worker.worker_heartbeat_seconds must be positive.")
+        if min(self.poll_seconds, self.heartbeat_seconds, self.worker_heartbeat_seconds) <= 0:
+            raise ConfigurationError("Worker intervals must be positive.")
         if not isinstance(self.metadata, dict):
             raise ConfigurationError("worker.metadata must be a TOML table/object.")
         self.spool_root.mkdir(parents=True, exist_ok=True)
-        if not self.spool_root.is_dir():
-            raise ConfigurationError(f"Worker spool root is not a directory: {self.spool_root}")
 
 
 @dataclass(frozen=True)
@@ -124,9 +118,7 @@ class NetworkWorkerConfig:
 def _expand_path(value: str, base_dir: Path) -> Path:
     expanded = os.path.expandvars(os.path.expanduser(value))
     path = Path(expanded)
-    if not path.is_absolute():
-        path = base_dir / path
-    return path.resolve()
+    return (path if path.is_absolute() else base_dir / path).resolve()
 
 
 def _read_config(path: str | Path) -> tuple[Path, dict[str, Any]]:
@@ -135,42 +127,36 @@ def _read_config(path: str | Path) -> tuple[Path, dict[str, Any]]:
         raise ConfigurationError(f"Runner configuration not found: {config_path}")
     try:
         with config_path.open("rb") as handle:
-            data = tomllib.load(handle)
+            return config_path, tomllib.load(handle)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigurationError(f"Invalid TOML in {config_path}: {exc}") from exc
-    return config_path, data
 
 
 def _runner_from_data(config_path: Path, data: dict[str, Any]) -> RunnerConfig:
     try:
         solver_data = data["solver"]
         runner_data = data.get("runner", {})
-        mode = str(solver_data.get("mode", "local"))
-        executable = _expand_path(str(solver_data["executable"]), config_path.parent)
         raw_psexec = solver_data.get("psexec_executable")
-        psexec = (
-            _expand_path(str(raw_psexec), config_path.parent)
-            if raw_psexec not in {None, ""}
-            else None
-        )
-        workspace_root = _expand_path(
-            str(runner_data.get("workspace_root", "./work")), config_path.parent
+        return RunnerConfig(
+            solver=SolverConfig(
+                executable=_expand_path(str(solver_data["executable"]), config_path.parent),
+                mode=str(solver_data.get("mode", "local")),
+                psexec_executable=(
+                    _expand_path(str(raw_psexec), config_path.parent)
+                    if raw_psexec not in {None, ""}
+                    else None
+                ),
+                process_name=str(solver_data.get("process_name", "SolverHistra.exe")),
+                close_without_ask=bool(solver_data.get("close_without_ask", True)),
+            ),
+            workspace_root=_expand_path(
+                str(runner_data.get("workspace_root", "./work")), config_path.parent
+            ),
+            keep_raw_on_success=bool(runner_data.get("keep_raw_on_success", True)),
+            keep_raw_on_failure=bool(runner_data.get("keep_raw_on_failure", True)),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ConfigurationError(f"Invalid runner configuration: {exc}") from exc
-
-    return RunnerConfig(
-        solver=SolverConfig(
-            executable=executable,
-            mode=mode,
-            psexec_executable=psexec,
-            process_name=str(solver_data.get("process_name", "SolverHistra.exe")),
-            close_without_ask=bool(solver_data.get("close_without_ask", True)),
-        ),
-        workspace_root=workspace_root,
-        keep_raw_on_success=bool(runner_data.get("keep_raw_on_success", True)),
-        keep_raw_on_failure=bool(runner_data.get("keep_raw_on_failure", True)),
-    )
 
 
 def load_runner_config(path: str | Path) -> RunnerConfig:
@@ -181,67 +167,42 @@ def load_runner_config(path: str | Path) -> RunnerConfig:
 def load_network_worker_config(path: str | Path) -> NetworkWorkerConfig:
     config_path, data = _read_config(path)
     runner = _runner_from_data(config_path, data)
-
     try:
         server_data = data["server"]
         worker_data = data.get("worker", {})
-        base_url = str(server_data["base_url"]).rstrip("/")
-        spool_root = _expand_path(
-            str(worker_data.get("spool_root", "./spool")), config_path.parent
-        )
         metadata = worker_data.get("metadata", {})
         if not isinstance(metadata, dict):
             raise TypeError("worker.metadata must be a table")
+        default_name = platform.node().strip() or "histra-worker"
+        solver_version_raw = worker_data.get("solver_version")
+        return NetworkWorkerConfig(
+            runner=runner,
+            server=ServerConfig(
+                base_url=str(server_data["base_url"]).rstrip("/"),
+                verify_tls=bool(server_data.get("verify_tls", True)),
+                request_timeout_seconds=float(server_data.get("request_timeout_seconds", 30.0)),
+                download_timeout_seconds=float(server_data.get("download_timeout_seconds", 180.0)),
+                upload_timeout_seconds=float(server_data.get("upload_timeout_seconds", 180.0)),
+                retry_attempts=int(server_data.get("retry_attempts", 5)),
+                retry_backoff_seconds=float(server_data.get("retry_backoff_seconds", 2.0)),
+                maximum_package_bytes=int(server_data.get("maximum_package_bytes", 100 * 1024 * 1024)),
+            ),
+            worker=WorkerConfig(
+                name=str(worker_data.get("name", default_name)).strip(),
+                max_parallel_jobs=int(worker_data.get("max_parallel_jobs", 1)),
+                spool_root=_expand_path(str(worker_data.get("spool_root", "./spool")), config_path.parent),
+                poll_seconds=float(worker_data.get("poll_seconds", 15.0)),
+                heartbeat_seconds=float(worker_data.get("heartbeat_seconds", 60.0)),
+                worker_heartbeat_seconds=float(worker_data.get("worker_heartbeat_seconds", 60.0)),
+                solver_version=(
+                    str(solver_version_raw).strip()
+                    if solver_version_raw not in {None, ""}
+                    else None
+                ),
+                metadata=dict(metadata),
+                cleanup_package_on_accept=bool(worker_data.get("cleanup_package_on_accept", True)),
+                cleanup_workspace_on_accept=bool(worker_data.get("cleanup_workspace_on_accept", False)),
+            ),
+        )
     except (KeyError, TypeError, ValueError) as exc:
         raise ConfigurationError(f"Invalid network worker configuration: {exc}") from exc
-
-    default_name = platform.node().strip() or "histra-worker"
-    solver_version_raw = worker_data.get("solver_version")
-    solver_version = (
-        str(solver_version_raw).strip()
-        if solver_version_raw not in {None, ""}
-        else None
-    )
-
-    config = NetworkWorkerConfig(
-        runner=runner,
-        server=ServerConfig(
-            base_url=base_url,
-            verify_tls=bool(server_data.get("verify_tls", True)),
-            request_timeout_seconds=float(
-                server_data.get("request_timeout_seconds", 30.0)
-            ),
-            download_timeout_seconds=float(
-                server_data.get("download_timeout_seconds", 180.0)
-            ),
-            upload_timeout_seconds=float(
-                server_data.get("upload_timeout_seconds", 180.0)
-            ),
-            retry_attempts=int(server_data.get("retry_attempts", 5)),
-            retry_backoff_seconds=float(
-                server_data.get("retry_backoff_seconds", 2.0)
-            ),
-            maximum_package_bytes=int(
-                server_data.get("maximum_package_bytes", 100 * 1024 * 1024)
-            ),
-        ),
-        worker=WorkerConfig(
-            name=str(worker_data.get("name", default_name)).strip(),
-            max_parallel_jobs=int(worker_data.get("max_parallel_jobs", 1)),
-            spool_root=spool_root,
-            poll_seconds=float(worker_data.get("poll_seconds", 15.0)),
-            heartbeat_seconds=float(worker_data.get("heartbeat_seconds", 60.0)),
-            worker_heartbeat_seconds=float(
-                worker_data.get("worker_heartbeat_seconds", 60.0)
-            ),
-            solver_version=solver_version,
-            metadata=dict(metadata),
-            cleanup_package_on_accept=bool(
-                worker_data.get("cleanup_package_on_accept", True)
-            ),
-            cleanup_workspace_on_accept=bool(
-                worker_data.get("cleanup_workspace_on_accept", False)
-            ),
-        ),
-    )
-    return config

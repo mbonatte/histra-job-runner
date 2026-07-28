@@ -21,8 +21,13 @@ def masonry_materials(root: ET.Element) -> list[dict[str, str | None]]:
         attrs = elem.attrib
         type_of = attrs.get("TypeOf", "")
         purpose = attrs.get("PurposeType", "")
-        if "MasonryMaterial" in type_of or "MasonryMaterial" in purpose:
-            records.append({"Key": attrs.get("Key"), "Name": attrs.get("Name")})
+        name = attrs.get("Name")
+        if (
+            "MasonryMaterial" in type_of
+            or "MasonryMaterial" in purpose
+            or name in {*DEFAULT_FOUNDATION_INTERFACE_MATERIALS, SCOURED_FOUNDATION_INTERFACE_MATERIAL}
+        ):
+            records.append({"Key": attrs.get("Key"), "Name": name})
     return records
 
 
@@ -75,7 +80,8 @@ def get_foundation_locations(
             ) from exc
         if length <= 0 or width <= 0:
             raise HrxValidationError(
-                f"pier_{index} has invalid foundation dimensions: length={length}, width={width}."
+                f"pier_{index} has invalid foundation dimensions: "
+                f"length={length}, width={width}."
             )
         foundations[f"pier_{index}"] = (
             x0,
@@ -97,7 +103,6 @@ def foundation_interfaces(
     ]
     foundation_locations = get_foundation_locations(root)
     result: dict[str, tuple[list[dict], list[dict], list[dict]]] = {}
-
     for pier_name, (x0, _y0, length, _width, z0) in foundation_locations.items():
         left_bank: list[dict] = []
         bottom: list[dict] = []
@@ -110,9 +115,9 @@ def foundation_interfaces(
                 x, _y, z = map(float, point.split(";"))
             except ValueError as exc:
                 raise HrxValidationError(
-                    f"Interface Key={interface.get('Key')!r} has invalid VInt3D1={point!r}."
+                    f"Interface Key={interface.get('Key')!r} has invalid "
+                    f"VInt3D1={point!r}."
                 ) from exc
-
             if x0 - length * 0.55 < x < x0 + length * 0.55:
                 if abs(z - z0) < 1:
                     bottom.append(interface)
@@ -152,26 +157,32 @@ def _get_first_material_key(root: ET.Element, material_names: tuple[str, ...]) -
         except HrxValidationError:
             continue
     raise HrxValidationError(
-        f"None of the default foundation interface materials were found: "
+        "None of the default foundation interface materials were found: "
         f"{', '.join(material_names)}."
     )
 
 
-def _compute_interface_xyz_center(interface: dict[str, Any]) -> tuple[float, float, float]:
+def _compute_interface_xyz_center(
+    interface: dict[str, Any],
+) -> tuple[float, float, float]:
     try:
         points = [
-            tuple(float(value) for value in str(interface[f"VInt3D{index}"]).split(";"))
-            for index in range(1, 5)
+            tuple(float(value) for value in str(interface[key]).split(";"))
+            for key in ("VInt3D1", "VInt3D2", "VInt3D3", "VInt3D4")
+            if interface.get(key) not in {None, ""}
         ]
-    except (KeyError, TypeError, ValueError) as exc:
+    except (TypeError, ValueError) as exc:
         raise HrxValidationError(
             f"Interface Key={interface.get('Key')!r} has invalid VInt3D coordinates."
         ) from exc
-    if any(len(point) != 3 for point in points):
+    if not points or any(len(point) != 3 for point in points):
         raise HrxValidationError(
-            f"Interface Key={interface.get('Key')!r} must have three coordinates per VInt3D point."
+            f"Interface Key={interface.get('Key')!r} must have three coordinates "
+            "per VInt3D point."
         )
-    return tuple(sum(point[axis] for point in points) / 4.0 for axis in range(3))  # type: ignore[return-value]
+    return tuple(
+        sum(point[axis] for point in points) / len(points) for axis in range(3)
+    )  # type: ignore[return-value]
 
 
 def _select_outside_delta_interfaces(
@@ -187,7 +198,6 @@ def _select_outside_delta_interfaces(
         raise ValueError(f"delta must be numeric. Got: {delta!r}") from exc
     if not 0 <= delta <= 1:
         raise ValueError(f"delta must be between 0 and 1. Got: {delta}")
-
     left_bank_x = x0 - length / 2
     right_bank_x = x0 + length / 2
     upstream_y = y0 - width / 2
@@ -231,7 +241,6 @@ def _select_outside_delta_interfaces(
             f"Unsupported scour mode '{mode}'. Expected 'left', 'right', "
             "'uniform', 'upstream', or 'downstream'."
         )
-
     selected_keys: list[str] = []
     for interface in interfaces:
         if should_select(_compute_interface_xyz_center(interface)):
@@ -244,7 +253,9 @@ def _select_outside_delta_interfaces(
 def set_default_interface(
     root: ET.Element,
     interfaces: list[dict],
-    foundation_interface_materials: tuple[str, ...] = DEFAULT_FOUNDATION_INTERFACE_MATERIALS,
+    foundation_interface_materials: tuple[
+        str, ...
+    ] = DEFAULT_FOUNDATION_INTERFACE_MATERIALS,
 ) -> list[str]:
     interface_keys = [str(item["Key"]) for item in interfaces if item.get("Key")]
     material_key = _get_first_material_key(root, foundation_interface_materials)
@@ -255,7 +266,9 @@ def update_foundation_interfaces(
     root: ET.Element,
     interface_scenario: dict,
     *,
-    foundation_interface_materials: tuple[str, ...] = DEFAULT_FOUNDATION_INTERFACE_MATERIALS,
+    foundation_interface_materials: tuple[
+        str, ...
+    ] = DEFAULT_FOUNDATION_INTERFACE_MATERIALS,
     scoured_foundation_interface_material: str = SCOURED_FOUNDATION_INTERFACE_MATERIAL,
 ) -> dict[str, Any]:
     """Apply one analysis step's foundation-interface scour mutation.
@@ -265,6 +278,7 @@ def update_foundation_interfaces(
     ``upstream`` and ``downstream``. A direct numeric pier value remains the
     backward-compatible shorthand for ``uniform``.
     """
+
     evidence: dict[str, Any] = {
         "applied": bool(interface_scenario),
         "foundation_interface_materials": list(foundation_interface_materials),
@@ -273,28 +287,30 @@ def update_foundation_interfaces(
     }
     if not interface_scenario:
         return evidence
-
     foundation_locations = get_foundation_locations(root)
     found_interfaces = foundation_interfaces(root)
     scoured_material_key = _get_material_key(
         root, material_name=scoured_foundation_interface_material
     )
-
     for pier, scour_config in interface_scenario.items():
         logger.info("Processing pier='%s', scour_config='%s'", pier, scour_config)
-        if pier not in found_interfaces:
+        resolved_pier = next(
+            (name for name in found_interfaces if name.casefold() == str(pier).casefold()),
+            None,
+        )
+        if resolved_pier is None:
             raise HrxValidationError(
                 f"Pier '{pier}' was not found in the foundation interfaces."
             )
-        if pier not in foundation_locations:
-            raise HrxValidationError(f"Pier '{pier}' was not found in the bridge geometry.")
-
-        bottom_interfaces = found_interfaces[pier][1]
+        if resolved_pier not in foundation_locations:
+            raise HrxValidationError(
+                f"Pier '{pier}' was not found in the bridge geometry."
+            )
+        bottom_interfaces = found_interfaces[resolved_pier][1]
         if not bottom_interfaces:
             raise HrxValidationError(
                 f"No bottom foundation interfaces were found for pier '{pier}'."
             )
-
         reset_keys = set_default_interface(
             root,
             bottom_interfaces,
@@ -311,7 +327,7 @@ def update_foundation_interfaces(
         for mode, delta in scour_items:
             selected_keys = _select_outside_delta_interfaces(
                 bottom_interfaces,
-                foundation_locations[pier],
+                foundation_locations[resolved_pier],
                 delta,
                 mode=mode,
             )
@@ -329,7 +345,6 @@ def update_foundation_interfaces(
                     "selected_interface_keys": changed_keys,
                 }
             )
-
         evidence["piers"][pier] = {
             "bottom_interface_count": len(bottom_interfaces),
             "reset_interface_keys": reset_keys,
@@ -344,10 +359,13 @@ def run_update_foundation_ifaces(
     interface_scenario: dict,
     out_path: str | Path | None = None,
     *,
-    foundation_interface_materials: tuple[str, ...] = DEFAULT_FOUNDATION_INTERFACE_MATERIALS,
+    foundation_interface_materials: tuple[
+        str, ...
+    ] = DEFAULT_FOUNDATION_INTERFACE_MATERIALS,
     scoured_foundation_interface_material: str = SCOURED_FOUNDATION_INTERFACE_MATERIAL,
 ) -> dict[str, Any]:
     """Mutate an HRX file using the original client-side scour operation name."""
+
     source = Path(in_path)
     target = Path(out_path) if out_path is not None else source
     encoding = detect_xml_encoding(source)

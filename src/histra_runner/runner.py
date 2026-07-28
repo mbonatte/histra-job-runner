@@ -10,24 +10,20 @@ import time
 import traceback
 import uuid
 
+from .backends import (
+    AnalysisPlan,
+    AnalysisPlanItem,
+    CSharpBackend,
+    MutationSchedule,
+    OutputRequest,
+    SolverBackend,
+    SolverJobResult,
+)
 from .config import RunnerConfig
-from .errors import (
-    HrxValidationError,
-    JobRunError,
-    SolverExecutionError,
-)
-from .extraction import extract_analysis_outputs
-from .hrx import (
-    analysis_evidence,
-    analysis_key,
-    dependency_order,
-    select_only_analysis,
-    validate_requested_analyses,
-)
+from .errors import JobRunError, SolverExecutionError
 from .jsonio import utc_now_iso, write_json_atomic
-from .schema import AnalysisSpec, JobSpec, load_job_spec, sha256_file
-from .solver import SolverClient, SolverExecution, SubprocessSolver
-from .scour import run_update_foundation_ifaces
+from .schema import JobSpec, load_job_spec, sha256_file
+from .solver import SolverClient
 from .state import StateStore
 
 
@@ -41,16 +37,24 @@ class RunOutcome:
 
 
 class JobRunner:
-    """Execute one self-contained local job package.
+    """Stage a package, delegate numerical work to a backend, and persist artifacts."""
 
-    The runner has no knowledge of queues, tokens or HTTP. Network code can be
-    added later as an adapter that downloads a package and calls this class.
-    """
-
-    def __init__(self, config: RunnerConfig, solver: SolverClient | None = None):
+    def __init__(
+        self,
+        config: RunnerConfig,
+        solver: SolverClient | None = None,
+        *,
+        backend: SolverBackend | None = None,
+    ):
+        if solver is not None and backend is not None:
+            raise ValueError("Pass either solver= or backend=, not both.")
         self.config = config
-        self.solver = solver or SubprocessSolver(config.solver)
-        self._uses_default_solver = solver is None
+        if backend is not None:
+            self.backend = backend
+            self._require_solver_files = False
+        else:
+            self.backend = CSharpBackend(config.solver, solver=solver)
+            self._require_solver_files = solver is None
 
     def run_job_file(self, job_path: str | Path) -> RunOutcome:
         resolved_job_path = Path(job_path).resolve()
@@ -64,7 +68,11 @@ class JobRunner:
         package_root: Path,
         source_job: Path | None = None,
     ) -> RunOutcome:
-        self.config.validate(require_solver_files=self._uses_default_solver)
+        self.config.validate(
+            require_solver_files=self._require_solver_files,
+            validate_solver=self._require_solver_files or isinstance(self.backend, CSharpBackend),
+        )
+        self.backend.validate()
         attempt_id = spec.attempt_id or f"attempt-{uuid.uuid4().hex[:12]}"
         workspace = self.config.workspace_root / spec.job_id / attempt_id
         if workspace.exists():
@@ -84,11 +92,6 @@ class JobRunner:
         state = StateStore(workspace / "state.json", spec.job_id, attempt_id)
         started_at = utc_now_iso()
         started = time.perf_counter()
-        executions: list[dict] = []
-        validation_evidence: list[dict] = []
-        mutation_evidence: list[dict] = []
-        mutation_by_analysis: dict[str, dict] = {}
-
         try:
             state.transition("validating")
             source_model = spec.validate_package(package_root)
@@ -100,82 +103,40 @@ class JobRunner:
             state.transition("staging")
             run_model = run_dir / "model.hrx"
             shutil.copy2(input_model, run_model)
-            requested_names = [analysis.name for analysis in spec.analyses]
-            names_to_validate = list(requested_names)
-            if spec.mesh.enabled:
-                names_to_validate.append(spec.mesh.analysis_name)
-            validate_requested_analyses(run_model, names_to_validate)
-            run_order = dependency_order(run_model, requested_names)
 
-            if spec.mesh.enabled:
-                state.transition("running", stage="mesh", analysis=spec.mesh.analysis_name)
-                execution, evidence = self._execute_analysis(
-                    run_model,
-                    spec.mesh.analysis_name,
-                    spec.mesh.timeout_seconds,
-                    logs_dir,
-                    stage_index=0,
-                )
-                executions.append(execution.as_dict())
-                validation_evidence.append(evidence)
-                self._require_completed_if_configured(evidence, spec)
-
-            requested_by_name = {analysis.name: analysis for analysis in spec.analyses}
-            default_timeout = max(analysis.timeout_seconds for analysis in spec.analyses)
-            for index, name in enumerate(run_order, start=1):
-                analysis_spec = requested_by_name.get(name)
-                state.transition("mutating", stage="foundation_interfaces", analysis=name)
-                mutation = run_update_foundation_ifaces(
-                    run_model,
-                    analysis_spec.interfaces if analysis_spec else {},
-                    foundation_interface_materials=(
-                        spec.scour.foundation_interface_materials
-                    ),
-                    scoured_foundation_interface_material=(
-                        spec.scour.scoured_foundation_interface_material
-                    ),
-                )
-                mutation["analysis"] = name
-                mutation_evidence.append(mutation)
-                mutation_by_analysis[name] = mutation
-
-                state.transition("running", stage="analysis", analysis=name)
-                timeout = analysis_spec.timeout_seconds if analysis_spec else default_timeout
-                execution, evidence = self._execute_analysis(
-                    run_model,
-                    name,
-                    timeout,
-                    logs_dir,
-                    stage_index=index,
-                )
-                executions.append(execution.as_dict())
-                validation_evidence.append(evidence)
-                self._require_completed_if_configured(evidence, spec)
-
-            results_database = run_model.with_suffix(".Results")
-            if spec.validation.require_results_database:
-                self._validate_results_database(results_database, spec.validation.minimum_results_bytes)
+            plan = self._analysis_plan(spec)
+            mutations = MutationSchedule(
+                interfaces_by_analysis={item.name: item.interfaces for item in spec.analyses},
+                foundation_interface_materials=spec.scour.foundation_interface_materials,
+                scoured_foundation_interface_material=spec.scour.scoured_foundation_interface_material,
+            )
+            outputs = OutputRequest(
+                outputs_by_analysis={item.name: item.outputs for item in spec.analyses}
+            )
+            state.transition("running", backend=self.backend.name)
+            backend_result = self.backend.run_job(
+                run_model,
+                plan,
+                mutations,
+                outputs,
+                timeout_seconds=self._job_timeout(plan),
+            )
+            self._write_execution_logs(logs_dir, backend_result)
 
             state.transition("extracting")
-            analysis_results: dict[str, dict] = {}
-            for analysis_spec in spec.analyses:
-                key = analysis_key(run_model, analysis_spec.name)
-                evidence = analysis_evidence(run_model, analysis_spec.name)
-                outputs = extract_analysis_outputs(
-                    results_database, key, analysis_spec.outputs
-                )
-                analysis_results[analysis_spec.name] = {
-                    "analysis_key": key,
-                    "interfaces": mutation_by_analysis.get(analysis_spec.name),
-                    "validation": evidence,
-                    "outputs": outputs,
-                }
-
             results_payload = {
                 "schema_version": "1.0",
                 "job_id": spec.job_id,
                 "attempt_id": attempt_id,
-                "analyses": analysis_results,
+                "analyses": {
+                    name: {
+                        "analysis_key": analysis.analysis_key,
+                        "interfaces": analysis.interfaces,
+                        "validation": analysis.validation,
+                        "outputs": analysis.outputs,
+                    }
+                    for name, analysis in backend_result.analyses.items()
+                },
             }
             results_path = output_dir / "results.json"
             write_json_atomic(results_path, results_payload)
@@ -192,32 +153,21 @@ class JobRunner:
                     duration_seconds=time.perf_counter() - started,
                     input_model=input_model,
                     run_model=run_model,
-                    results_database=results_database,
-                    executions=executions,
-                    validation_evidence=validation_evidence,
-                    mutation_evidence=mutation_evidence,
+                    backend_result=backend_result,
                     status="completed",
                 ),
             )
             state.transition("completed", results=str(results_path.relative_to(workspace)))
-
             if not self.config.keep_raw_on_success:
                 shutil.rmtree(run_dir, ignore_errors=True)
-
-            return RunOutcome(
-                job_id=spec.job_id,
-                attempt_id=attempt_id,
-                workspace=workspace,
-                results_path=results_path,
-                manifest_path=manifest_path,
-            )
-
+            return RunOutcome(spec.job_id, attempt_id, workspace, results_path, manifest_path)
         except Exception as exc:
             failure = {
                 "job_id": spec.job_id,
                 "attempt_id": attempt_id,
                 "status": "failed",
                 "failed_at": utc_now_iso(),
+                "backend": self.backend.name,
                 "error_type": type(exc).__name__,
                 "message": str(exc),
             }
@@ -244,50 +194,40 @@ class JobRunner:
                 shutil.rmtree(run_dir, ignore_errors=True)
             raise JobRunError(spec.job_id, workspace, exc) from exc
 
-    def _execute_analysis(
-        self,
-        run_model: Path,
-        analysis_name: str,
-        timeout_seconds: float,
-        logs_dir: Path,
-        *,
-        stage_index: int,
-    ) -> tuple[SolverExecution, dict]:
-        select_only_analysis(run_model, analysis_name)
-        execution = self.solver.run(run_model, timeout_seconds)
-        safe_name = "".join(
-            character if character.isalnum() or character in "._-" else "_"
-            for character in analysis_name
+    @staticmethod
+    def _analysis_plan(spec: JobSpec) -> AnalysisPlan:
+        return AnalysisPlan(
+            analyses=tuple(
+                AnalysisPlanItem(item.name, item.timeout_seconds) for item in spec.analyses
+            ),
+            mesh_analysis=(
+                AnalysisPlanItem(spec.mesh.analysis_name, spec.mesh.timeout_seconds)
+                if spec.mesh.enabled
+                else None
+            ),
+            validation=spec.validation,
         )
-        prefix = f"{stage_index:03d}-{safe_name}"
-        (logs_dir / f"{prefix}.stdout.log").write_text(
-            execution.stdout, encoding="utf-8", errors="replace"
-        )
-        (logs_dir / f"{prefix}.stderr.log").write_text(
-            execution.stderr, encoding="utf-8", errors="replace"
-        )
-        evidence = analysis_evidence(run_model, analysis_name)
-        evidence["solver_return_code"] = execution.return_code
-        evidence["solver_duration_seconds"] = round(execution.duration_seconds, 3)
-        return execution, evidence
 
     @staticmethod
-    def _require_completed_if_configured(evidence: dict, spec: JobSpec) -> None:
-        if spec.validation.require_completed_state and not evidence.get("completed"):
-            name = evidence.get("name", "<unknown>")
-            states = [item.get("state") for item in evidence.get("states", [])]
-            raise HrxValidationError(
-                f"Analysis '{name}' did not finish with ExecutedCompleted states: {states}."
+    def _job_timeout(plan: AnalysisPlan) -> float:
+        total = sum(item.timeout_seconds for item in plan.analyses)
+        if plan.mesh_analysis is not None:
+            total += plan.mesh_analysis.timeout_seconds
+        return max(total, 1.0)
+
+    @staticmethod
+    def _write_execution_logs(logs_dir: Path, result: SolverJobResult) -> None:
+        for index, item in enumerate(result.executions):
+            safe_name = "".join(
+                character if character.isalnum() or character in "._-" else "_"
+                for character in item.analysis
             )
-
-    @staticmethod
-    def _validate_results_database(path: Path, minimum_bytes: int) -> None:
-        if not path.is_file():
-            raise HrxValidationError(f"Expected results database was not created: {path}")
-        size = path.stat().st_size
-        if size < minimum_bytes:
-            raise HrxValidationError(
-                f"Results database is too small ({size} bytes; minimum {minimum_bytes})."
+            prefix = f"{index:03d}-{safe_name}"
+            (logs_dir / f"{prefix}.stdout.log").write_text(
+                item.stdout, encoding="utf-8", errors="replace"
+            )
+            (logs_dir / f"{prefix}.stderr.log").write_text(
+                item.stderr, encoding="utf-8", errors="replace"
             )
 
     @staticmethod
@@ -300,21 +240,26 @@ class JobRunner:
         duration_seconds: float,
         input_model: Path,
         run_model: Path,
-        results_database: Path,
-        executions: list[dict],
-        validation_evidence: list[dict],
-        mutation_evidence: list[dict],
+        backend_result: SolverJobResult,
         status: str,
     ) -> dict:
         try:
             package_version = version("histra-job-runner")
         except PackageNotFoundError:
             package_version = "0.4.0+source"
-        return {
+        artifacts = {
+            name: {
+                "path": str(path),
+                "size_bytes": path.stat().st_size if path.exists() and path.is_file() else None,
+            }
+            for name, path in backend_result.artifacts.items()
+        }
+        payload = {
             "schema_version": "1.0",
             "job_id": spec.job_id,
             "attempt_id": attempt_id,
             "status": status,
+            "backend": backend_result.backend,
             "started_at": started_at,
             "finished_at": finished_at,
             "duration_seconds": round(duration_seconds, 3),
@@ -328,14 +273,19 @@ class JobRunner:
                 "input_sha256": sha256_file(input_model),
                 "final_sha256": sha256_file(run_model),
             },
-            "results_database": {
-                "path": str(results_database.name),
-                "size_bytes": results_database.stat().st_size
-                if results_database.exists()
-                else None,
-            },
-            "executions": executions,
-            "mutations": mutation_evidence,
-            "validation": validation_evidence,
+            "artifacts": artifacts,
+            "executions": [item.as_manifest_dict() for item in backend_result.executions],
+            "mutations": list(backend_result.mutations),
+            "validation": list(backend_result.validation),
             "metadata": spec.metadata,
+            "backend_metadata": dict(backend_result.metadata),
         }
+        results_database = backend_result.artifacts.get("results_database")
+        if results_database is not None:
+            payload["results_database"] = {
+                "path": str(results_database.name),
+                "size_bytes": (
+                    results_database.stat().st_size if results_database.exists() else None
+                ),
+            }
+        return payload

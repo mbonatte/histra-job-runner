@@ -1,69 +1,25 @@
 {
   "schema_version": "1.0",
-  "job_id": "bridge-001-scour-sequence",
+  "job_id": "bridge-example",
+  "attempt_id": "attempt-1",
   "model": {
     "path": "model.hrx"
   },
   "mesh": {
     "enabled": true,
     "analysis_name": "StartMesh",
-    "timeout_seconds": 900
-  },
-  "scour": {
-    "foundation_interface_materials": ["Foundation_Soil", "Soil"],
-    "scoured_foundation_interface_material": "Soil_removed"
+    "timeout_seconds": 600
   },
   "analyses": [
     {
-      "name": "Scour_1",
-      "timeout_seconds": 3600,
-      "interfaces": {
-        "pier_1": {
-          "uniform": 0.2
-        }
-      },
-      "outputs": {
-        "displacements": {
-          "enabled": true,
-          "all_steps": true,
-          "model_point_ids": []
-        },
-        "reactions": {
-          "enabled": true,
-          "all_steps": true
-        },
-        "modal_contributions": {
-          "enabled": false,
-          "top_n": 3
-        }
-      }
-    },
-    {
       "name": "LiveLoad_1",
       "timeout_seconds": 3600,
+      "interfaces": {},
       "outputs": {
-        "displacements": {
-          "enabled": true,
-          "all_steps": true,
-          "model_point_ids": []
-        },
-        "reactions": {
-          "enabled": true,
-          "all_steps": true
-        },
-        "modal_contributions": {
-          "enabled": false,
-          "top_n": 3
-        }
+        "reactions": {"enabled": true, "all_steps": true},
+        "displacements": {"enabled": true, "all_steps": true},
+        "modal_contributions": {"enabled": false}
       }
     }
-  ],
-  "validation": {
-    "require_completed_state": true,
-    "require_results_database": true,
-    "minimum_results_bytes": 1
-  },
-  "metadata": {
-    "scenario_id": "bridge-001-scour-sequence"
-  }
+  ]
 }

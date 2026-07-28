@@ -20,7 +20,9 @@ def open_results_database(path: Path) -> Iterator[sqlite3.Connection]:
         connection.row_factory = sqlite3.Row
         yield connection
     except sqlite3.Error as exc:
-        raise ResultExtractionError(f"Could not read results database {resolved}: {exc}") from exc
+        raise ResultExtractionError(
+            f"Could not read results database {resolved}: {exc}"
+        ) from exc
     finally:
         if "connection" in locals():
             connection.close()
@@ -57,7 +59,6 @@ def extract_reactions(
     selected = _select_columns(columns, ["Step", "R1", "R2", "R3"])
     if "Step" not in selected:
         raise ResultExtractionError(f"{table} has no Step column.")
-
     params: list[object] = [analysis_key]
     where = ["AnalysisKey = ?"]
     if not all_steps:
@@ -71,9 +72,9 @@ def extract_reactions(
             return []
         where.append("Step = ?")
         params.append(step)
-
+    selected_sql = ", ".join(f'"{column}"' for column in selected)
     sql = (
-        f'SELECT {", ".join(f"\"{column}\"" for column in selected)} '
+        f"SELECT {selected_sql} "
         f'FROM "{table}" WHERE {" AND ".join(where)} ORDER BY "Step"'
     )
     return _row_dicts(connection.execute(sql, params).fetchall())
@@ -93,14 +94,12 @@ def extract_displacements(
     selected = _select_columns(columns, desired)
     if "Step" not in selected or "IdElement" not in selected:
         raise ResultExtractionError(f"{table} requires Step and IdElement columns.")
-
     params: list[object] = [analysis_key]
     where = ["AnalysisKey = ?"]
     if model_point_ids:
         placeholders = ", ".join("?" for _ in model_point_ids)
         where.append(f"IdElement IN ({placeholders})")
         params.extend(model_point_ids)
-
     if not all_steps:
         if step is None:
             step_query = (
@@ -113,9 +112,9 @@ def extract_displacements(
             return []
         where.append("Step = ?")
         params.append(step)
-
+    selected_sql = ", ".join(f'"{column}"' for column in selected)
     sql = (
-        f'SELECT {", ".join(f"\"{column}\"" for column in selected)} '
+        f"SELECT {selected_sql} "
         f'FROM "{table}" WHERE {" AND ".join(where)} '
         f'ORDER BY "IdElement", "Step"'
     )
@@ -132,17 +131,20 @@ def extract_modal_contributions(
     columns = _table_columns(connection, table)
     desired = ["Step", "Fn", "Mx_pcent", "My_pcent", "Mz_pcent"]
     selected = _select_columns(columns, desired)
-    direction_columns = [column for column in ("Mx_pcent", "My_pcent", "Mz_pcent") if column in columns]
+    direction_columns = [
+        column
+        for column in ("Mx_pcent", "My_pcent", "Mz_pcent")
+        if column in columns
+    ]
     if not direction_columns:
         raise ResultExtractionError(f"{table} has no modal participation columns.")
-
-    sql = (
-        f'SELECT {", ".join(f"\"{column}\"" for column in selected)} '
-        f'FROM "{table}" WHERE "AnalysisKey" = ?'
-    )
+    selected_sql = ", ".join(f'"{column}"' for column in selected)
+    sql = f'SELECT {selected_sql} FROM "{table}" WHERE "AnalysisKey" = ?'
     rows = _row_dicts(connection.execute(sql, (analysis_key,)).fetchall())
     result: dict[str, object] = {"X": [], "Y": [], "Z": [], "Cumulative": {}}
     labels = {"Mx_pcent": "X", "My_pcent": "Y", "Mz_pcent": "Z"}
+    cumulative = result["Cumulative"]
+    assert isinstance(cumulative, dict)
     for column in direction_columns:
         ranked = sorted(
             rows,
@@ -150,7 +152,7 @@ def extract_modal_contributions(
             reverse=True,
         )[:top_n]
         result[labels[column]] = ranked
-        result["Cumulative"][column] = sum(float(record.get(column) or 0.0) for record in rows)  # type: ignore[index]
+        cumulative[column] = sum(float(record.get(column) or 0.0) for record in rows)
     return result
 
 
