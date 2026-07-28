@@ -36,12 +36,14 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _validate_job(job_path: Path, *, skip_hash: bool) -> None:
+def _validate_job(
+    job_path: Path, *, skip_hash: bool, backend_type: str = "csharp"
+) -> None:
     resolved = job_path.resolve()
     spec = load_job_spec(resolved)
     model = spec.validate_package(resolved.parent, verify_hash=not skip_hash)
     names = [item.name for item in spec.analyses]
-    if spec.mesh.enabled:
+    if spec.mesh.enabled and backend_type.casefold() == "csharp":
         names.append(spec.mesh.analysis_name)
     validate_requested_analyses(model, names)
     print(f"VALID: {spec.job_id} ({model})")
@@ -59,9 +61,14 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "validate":
-            _validate_job(args.job, skip_hash=args.skip_hash)
-            if args.config:
-                load_runner_config(args.config).validate(require_solver_files=True)
+            config = load_runner_config(args.config) if args.config else None
+            _validate_job(
+                args.job,
+                skip_hash=args.skip_hash,
+                backend_type=config.backend.type if config is not None else "csharp",
+            )
+            if config is not None:
+                config.validate(require_solver_files=True)
                 print(f"CONFIG VALID: {args.config.resolve()}")
             return 0
         if args.command == "run":

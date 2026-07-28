@@ -9,7 +9,7 @@ from typing import Any
 from .errors import PackageError
 from .jsonio import read_json
 
-RUNNER_VERSION = "0.4.0"
+RUNNER_VERSION = "0.5.0"
 SUPPORTED_PACKAGE_PROTOCOLS = {"1.1"}
 SUPPORTED_JOB_SCHEMA_VERSIONS = {"1.0"}
 RUNNER_CAPABILITIES = {
@@ -20,6 +20,9 @@ RUNNER_CAPABILITIES = {
     "modal-contributions",
     "solver-backend-protocol",
     "csharp-backend",
+    "python-backend",
+    "in-process-analysis-chain",
+    "python-model-point-projection",
 }
 
 

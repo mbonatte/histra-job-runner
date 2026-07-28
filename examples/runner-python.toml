@@ -1,0 +1,10 @@
+[backend]
+type = "python"
+
+[python]
+combination_row = 1
+
+[runner]
+workspace_root = "./work-python"
+keep_raw_on_success = true
+keep_raw_on_failure = true

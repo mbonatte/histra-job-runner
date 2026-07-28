@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "histra-job-runner"
-version = "0.4.0"
+version = "0.5.0"
 description = "Local HiStrA job runner with an HTTPS pull-worker adapter."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,6 +16,9 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+python-backend = [
+  "histra-python @ git+https://github.com/mbonatte/histra-python.git@main",
+]
 dev = ["pytest>=8", "build>=1.2"]
 
 [project.scripts]

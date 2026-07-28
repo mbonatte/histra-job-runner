@@ -7,9 +7,5 @@ build/
 dist/
 *.egg-info/
 .venv/
-
-runner.toml
 work/
 spool/
-jobs/
-histra/

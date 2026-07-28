@@ -275,6 +275,7 @@ class NetworkWorker:
                 "protocol_versions": sorted(SUPPORTED_PACKAGE_PROTOCOLS),
                 "job_schema_versions": sorted(SUPPORTED_JOB_SCHEMA_VERSIONS),
                 "capabilities": sorted(set(RUNNER_CAPABILITIES) | {str(x) for x in existing}),
+                "solver_backend": self.config.runner.backend.type,
             }
         )
         return metadata

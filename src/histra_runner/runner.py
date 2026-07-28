@@ -18,6 +18,7 @@ from .backends import (
     OutputRequest,
     SolverBackend,
     SolverJobResult,
+    build_backend,
 )
 from .config import RunnerConfig
 from .errors import JobRunError, SolverExecutionError
@@ -52,9 +53,14 @@ class JobRunner:
         if backend is not None:
             self.backend = backend
             self._require_solver_files = False
-        else:
+        elif solver is not None:
+            if config.solver is None:
+                raise ValueError("solver= requires a C# SolverConfig.")
             self.backend = CSharpBackend(config.solver, solver=solver)
-            self._require_solver_files = solver is None
+            self._require_solver_files = False
+        else:
+            self.backend = build_backend(config)
+            self._require_solver_files = self.backend.name == "csharp"
 
     def run_job_file(self, job_path: str | Path) -> RunOutcome:
         resolved_job_path = Path(job_path).resolve()
@@ -70,7 +76,7 @@ class JobRunner:
     ) -> RunOutcome:
         self.config.validate(
             require_solver_files=self._require_solver_files,
-            validate_solver=self._require_solver_files or isinstance(self.backend, CSharpBackend),
+            validate_solver=self.backend.name == "csharp",
         )
         self.backend.validate()
         attempt_id = spec.attempt_id or f"attempt-{uuid.uuid4().hex[:12]}"
@@ -246,7 +252,7 @@ class JobRunner:
         try:
             package_version = version("histra-job-runner")
         except PackageNotFoundError:
-            package_version = "0.4.0+source"
+            package_version = "0.5.0+source"
         artifacts = {
             name: {
                 "path": str(path),

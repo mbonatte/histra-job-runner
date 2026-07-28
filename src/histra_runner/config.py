@@ -32,9 +32,29 @@ class SolverConfig:
 
 
 @dataclass(frozen=True)
+class BackendConfig:
+    type: str = "csharp"
+
+    def validate(self) -> None:
+        if self.type.casefold() not in {"csharp", "python"}:
+            raise ConfigurationError("backend.type must be 'csharp' or 'python'.")
+
+
+@dataclass(frozen=True)
+class PythonSolverConfig:
+    combination_row: int = 1
+
+    def validate(self) -> None:
+        if self.combination_row < 1:
+            raise ConfigurationError("python.combination_row must be at least 1.")
+
+
+@dataclass(frozen=True)
 class RunnerConfig:
-    solver: SolverConfig
+    solver: SolverConfig | None
     workspace_root: Path
+    backend: BackendConfig = field(default_factory=BackendConfig)
+    python: PythonSolverConfig = field(default_factory=PythonSolverConfig)
     keep_raw_on_success: bool = True
     keep_raw_on_failure: bool = True
 
@@ -44,7 +64,11 @@ class RunnerConfig:
         require_solver_files: bool = True,
         validate_solver: bool = True,
     ) -> None:
-        if validate_solver:
+        self.backend.validate()
+        self.python.validate()
+        if validate_solver and self.backend.type.casefold() == "csharp":
+            if self.solver is None:
+                raise ConfigurationError("[solver] is required for the C# backend.")
             self.solver.validate(require_files=require_solver_files)
         self.workspace_root.mkdir(parents=True, exist_ok=True)
         if not self.workspace_root.is_dir():
@@ -134,11 +158,15 @@ def _read_config(path: str | Path) -> tuple[Path, dict[str, Any]]:
 
 def _runner_from_data(config_path: Path, data: dict[str, Any]) -> RunnerConfig:
     try:
-        solver_data = data["solver"]
         runner_data = data.get("runner", {})
-        raw_psexec = solver_data.get("psexec_executable")
-        return RunnerConfig(
-            solver=SolverConfig(
+        backend_data = data.get("backend", {})
+        python_data = data.get("python", {})
+        backend_type = str(backend_data.get("type", "csharp"))
+        solver_data = data.get("solver")
+        solver: SolverConfig | None = None
+        if solver_data is not None:
+            raw_psexec = solver_data.get("psexec_executable")
+            solver = SolverConfig(
                 executable=_expand_path(str(solver_data["executable"]), config_path.parent),
                 mode=str(solver_data.get("mode", "local")),
                 psexec_executable=(
@@ -148,9 +176,17 @@ def _runner_from_data(config_path: Path, data: dict[str, Any]) -> RunnerConfig:
                 ),
                 process_name=str(solver_data.get("process_name", "SolverHistra.exe")),
                 close_without_ask=bool(solver_data.get("close_without_ask", True)),
-            ),
+            )
+        if backend_type.casefold() == "csharp" and solver is None:
+            raise KeyError("solver")
+        return RunnerConfig(
+            solver=solver,
             workspace_root=_expand_path(
                 str(runner_data.get("workspace_root", "./work")), config_path.parent
+            ),
+            backend=BackendConfig(type=backend_type),
+            python=PythonSolverConfig(
+                combination_row=int(python_data.get("combination_row", 1))
             ),
             keep_raw_on_success=bool(runner_data.get("keep_raw_on_success", True)),
             keep_raw_on_failure=bool(runner_data.get("keep_raw_on_failure", True)),

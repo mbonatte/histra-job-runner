@@ -381,3 +381,58 @@ def run_update_foundation_ifaces(
     elif out_path is not None and target != source:
         target.write_bytes(source.read_bytes())
     return evidence
+
+
+def resolve_foundation_interface_mutations(
+    in_path: str | Path,
+    interface_scenario: dict,
+    *,
+    foundation_interface_materials: tuple[str, ...] = DEFAULT_FOUNDATION_INTERFACE_MATERIALS,
+    scoured_foundation_interface_material: str = SCOURED_FOUNDATION_INTERFACE_MATERIAL,
+) -> dict[str, Any]:
+    """Resolve the existing HRX scour procedure into in-memory assignments.
+
+    The resolver executes the same reset-and-scour algorithm against an XML
+    copy, then returns ordered concrete interface/material-key assignments for
+    an in-process solver. The source HRX is never modified.
+    """
+    import copy
+
+    root = read_hrx(Path(in_path))
+    working = copy.deepcopy(root)
+    evidence = update_foundation_interfaces(
+        working,
+        interface_scenario,
+        foundation_interface_materials=foundation_interface_materials,
+        scoured_foundation_interface_material=scoured_foundation_interface_material,
+    )
+    if not evidence["applied"]:
+        return {"evidence": evidence, "assignments": []}
+
+    affected: set[str] = set()
+    for pier in evidence["piers"].values():
+        affected.update(str(key) for key in pier["reset_interface_keys"])
+    final_materials: dict[str, list[int]] = {}
+    for interface in working.iter("Interface"):
+        key = interface.get("Key")
+        if key not in affected:
+            continue
+        material_key = interface.get("MaterialKey")
+        if material_key is None:
+            raise HrxValidationError(f"Interface Key={key!r} has no MaterialKey.")
+        final_materials.setdefault(material_key, []).append(int(str(key)))
+
+    # Apply the default group first and the scoured group second, matching the
+    # C# helper's observable reset-then-scour sequence.
+    default_key = _get_first_material_key(working, foundation_interface_materials)
+    scoured_key = _get_material_key(working, scoured_foundation_interface_material)
+    ordered_keys = [default_key, scoured_key]
+    assignments = [
+        {
+            "material_key": int(material_key),
+            "interface_keys": sorted(final_materials.get(material_key, [])),
+        }
+        for material_key in ordered_keys
+        if final_materials.get(material_key)
+    ]
+    return {"evidence": evidence, "assignments": assignments}
