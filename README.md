@@ -1,139 +1,122 @@
-# HiStrA Job Runner
+# histra-job-runner
 
-HiStrA Job Runner stages deterministic analysis packages and delegates numerical
-execution to a selectable solver backend.
-
-## Backends
-
-```text
-JobRunner
-├── CSharpBackend   SolverHistra.exe + mutable HRX/.Results workflow
-└── PythonBackend   histra-python, in-process committed-state workflow
-```
-
-Both backends implement the same `SolverBackend.run_job(...)` protocol and emit
-the existing `results.json` schema. The C# backend remains the default, so old
-configuration files continue to work unchanged.
-
-### C# backend
-
-The C# backend preserves the existing procedure:
-
-1. select one analysis by editing the HRX;
-2. apply foundation-interface changes to the HRX;
-3. start a new `SolverHistra.exe` process;
-4. let HiStrA restore predecessor state from HRX + `.Results`;
-5. validate the HRX execution state and extract SQLite outputs.
-
-### Python backend
-
-The Python backend loads the HRX once and keeps committed displacements and
-constitutive state in one `histra.AnalysisSession`. It does not create or read a
-`.Results` database and does not change analysis execution flags in the HRX.
-Before each requested analysis, the existing Job Runner scour helper is executed
-against an XML copy to resolve the same semantic pier/direction request into
-concrete interface and material keys. Those keys are then applied in memory.
-
-Supported Python outputs are:
-
-- C#-compatible `DisplModelPoints` rows: `IdElement`, `ParentKey`, `Step`,
-  `Ux`, `Uy`, `Uz`;
-- C#-compatible `ReactionSumStates` rows: `Step`, `R1`, `R2`, `R3`.
-
-Modal contribution requests and P-Delta analyses fail during capability
-preflight because the Python solver does not yet provide equivalent subsystems.
-
-## Installation
-
-Install the two repositories as sibling checkouts:
-
-```console
-python -m pip install -e ../histra-python
-python -m pip install -e .
-```
-
-Or install their wheels from each repository's `dist/` directory.
-
-A Git-based optional dependency is also available after the updated
-`histra-python` repository is published:
-
-```console
-python -m pip install '.[python-backend]'
-```
-
-For development:
-
-```console
-python -m pip install -e '.[dev]'
-pytest
-```
-
-## Configuration
-
-Existing C# configuration remains valid:
-
-```toml
-[solver]
-executable = 'C:\Program Files\Gruppo Sismica\HiStrA Bridges 2025.1.6\SolverHistra.exe'
-mode = "local"
-
-[runner]
-workspace_root = "./work"
-```
-
-Python execution needs no `[solver]` section:
-
-```toml
-[backend]
-type = "python"
-
-[python]
-combination_row = 1
-
-[runner]
-workspace_root = "./work"
-keep_raw_on_success = true
-keep_raw_on_failure = true
-```
-
-Run either backend with the same command and job schema:
-
-```console
-histra-runner run --config runner.toml path/to/job.json
-```
-
-For the Python backend, an enabled `mesh` item is treated as in-process model
-preparation; the C# `StartMesh` analysis is not executed.
-
-## Workspace
+The Runner is deliberately ignorant of model generation and queue internals. It
+accepts a leased package, verifies it, invokes a configured analysis adapter,
+and returns results with the exact JOB and HRX provenance.
 
 ```text
-input/       immutable staged inputs
-run/         backend working model and C# .Results when applicable
-logs/        subprocess or in-process solver logs
-output/      results.json, run.json, or failure.json
-state.json   durable attempt state
+Server package
+  manifest.json
+  job.json
+  model.hrx
+       |
+       v
+safe extraction + identity/hash validation
+       |
+       v
+configured backend adapter
+       |
+       v
+results + run metadata + logs
+       |
+       v
+Server result endpoint
 ```
 
-## Concurrency and cancellation
+## Security boundary
 
-The Python solver currently uses shared `ModelManager` runtime fields. Therefore
-`histra-python` serializes active solves with a process-wide lock. Job Runner can
-still process C# jobs concurrently; Python solves within one worker process run
-one at a time. Deadlines are cooperative and checked during analysis setup,
-load steps, Newton iterations, line-search iterations, ALS retries, and between
-expensive solver operations.
+Before any solver process starts, the Runner:
+
+- rejects absolute paths, traversal, backslashes, symbolic links, duplicates,
+  excess files, and oversized expanded packages;
+- requires exactly `manifest.json`, canonical `job.json`, and the declared HRX;
+- validates package protocol `1.0`;
+- validates JOB ID, attempt ID, canonical JOB SHA-256, HRX size, and HRX SHA-256;
+- cross-checks Builder provenance against the package manifest;
+- binds all identities and digests to the active server claim.
+
+The extracted JOB and HRX are then trusted only for that attempt.
+
+## Analysis adapters
+
+The generic Runner cannot embed proprietary HiStrA solver behavior. Instead it
+has one stable adapter interface and two implementations.
+
+### Command adapter
+
+Use an argument vector with these placeholders:
+
+- `{hrx}`: validated HRX path;
+- `{job}`: validated canonical JOB path;
+- `{workspace}`: extracted input directory;
+- `{output}`: directory where the adapter must write outputs.
+
+The adapter must create:
+
+```text
+output/results.json   # analysis result object
+output/run.json       # solver/version/timing/provenance object
+```
+
+Example:
+
+```bash
+histra-runner worker \
+  --server http://server:8000 \
+  --runner-id workstation-01 \
+  --name workstation-01 \
+  --command 'python run_histra.py --model {hrx} --job {job} --output {output}'
+```
+
+This is where the existing HiStrA execution workflow should live. It can use the
+`workflow` section without knowing how the HRX was created.
+
+### Python adapter
+
+A trusted package can expose:
+
+```python
+def execute(package, output_dir):
+    return {
+        "results": {...},
+        "run": {...},
+        "logs": "..."
+    }
+```
+
+Run it with `--python-backend your_package.module:execute`.
+
+## Worker protocol
+
+The worker uses only the Server's unversioned 1.0 API:
+
+1. register identity;
+2. claim one JOB;
+3. download its runner-bound ZIP;
+4. heartbeat while the backend runs;
+5. upload a provenance-bound result or a structured failure;
+6. remove the workspace unless `--keep-workspaces` is enabled.
+
+Run one claim for diagnostics:
+
+```bash
+histra-runner worker --once ...
+```
+
+Validate a package without executing it:
+
+```bash
+histra-runner validate package.zip ./inspection
+```
 
 ## Tests
 
-```console
+```bash
+python -m pip install -e '.[test]'
 pytest
 ```
 
-The suite includes the legacy C# workflow, backend delegation, Python backend
-selection, semantic scour resolution, and an optional real Job Runner →
-`histra-python` integration test:
-
-```console
-HISTRA_PYTHON_REPO=../histra-python pytest
-```
+The suite includes hostile ZIPs, tampered manifests and payloads, process and
+Python adapters, network protocol behavior, heartbeat operation, cleanup, and
+failure reporting. Real solver acceptance tests should be added in the private
+adapter repository using licensed HiStrA fixtures.

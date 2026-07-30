@@ -1,31 +1,17 @@
-"""HiStrA job runner public API."""
-from .backends import (
-    AnalysisJobResult,
-    AnalysisPlan,
-    AnalysisPlanItem,
-    BackendExecution,
-    CSharpBackend,
-    MutationSchedule,
-    OutputRequest,
-    SolverBackend,
-    SolverJobResult,
-)
-from .contracts import RUNNER_VERSION
-from .runner import JobRunner, RunOutcome
+"""HiStrA runner package."""
 
-__version__ = RUNNER_VERSION
+from .backends import CommandBackend, ExecutionBackend, ExecutionResult, PythonBackend
+from .executor import RunOutcome, RunnerExecutor
+from .package import PackageContents, validate_package
 
 __all__ = [
-    "AnalysisJobResult",
-    "AnalysisPlan",
-    "AnalysisPlanItem",
-    "BackendExecution",
-    "CSharpBackend",
-    "JobRunner",
-    "MutationSchedule",
-    "OutputRequest",
+    "CommandBackend",
+    "ExecutionBackend",
+    "ExecutionResult",
+    "PackageContents",
+    "PythonBackend",
     "RunOutcome",
-    "SolverBackend",
-    "SolverJobResult",
-    "__version__",
+    "RunnerExecutor",
+    "validate_package",
 ]
+__version__ = "1.0.0"

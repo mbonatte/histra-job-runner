@@ -1,281 +1,100 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Callable
-import json
-import logging
 import shutil
-import time
+import threading
+from dataclasses import dataclass, field
+from pathlib import Path
 
-from .config import NetworkWorkerConfig
-from .contracts import (
-    RUNNER_CAPABILITIES,
-    RUNNER_VERSION,
-    SUPPORTED_JOB_SCHEMA_VERSIONS,
-    SUPPORTED_PACKAGE_PROTOCOLS,
-)
-from .errors import JobRunError, NetworkWorkerError, ServerRequestError
-from .jsonio import read_json, utc_now_iso, write_json_atomic
-from .network import Claim, ServerClient
-from .runner import JobRunner
-from .spool import AttemptRecord, AttemptSpool
-
-logger = logging.getLogger(__name__)
+from .contracts import Claim
+from .executor import RunnerExecutor
+from .network import ServerClient
 
 
-@dataclass(frozen=True)
-class ProcessResult:
-    job_id: str
-    attempt_id: str
-    local_status: str
-    detail: str = ""
+class HeartbeatLoop:
+    def __init__(self, client: ServerClient, claim: Claim, runner_id: str, interval: float):
+        self.client = client
+        self.claim = claim
+        self.runner_id = runner_id
+        self.interval = interval
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.error: Exception | None = None
 
+    def __enter__(self) -> "HeartbeatLoop":
+        if self.interval <= 0:
+            return self
 
-class NetworkWorker:
-    """Pull jobs from the server and execute them through the local JobRunner."""
+        def run() -> None:
+            while not self._stop.wait(self.interval):
+                try:
+                    self.client.heartbeat(self.claim, self.runner_id)
+                except Exception as exc:  # captured and surfaced after execution
+                    self.error = exc
+                    self._stop.set()
 
-    def __init__(
-        self,
-        config: NetworkWorkerConfig,
-        *,
-        client: ServerClient | None = None,
-        runner_factory: Callable[[], JobRunner] | None = None,
-    ):
-        self.config = config
-        self.config.validate(require_solver_files=runner_factory is None)
-        self.client = client or ServerClient(config.server)
-        self._owns_client = client is None
-        self.runner_factory = runner_factory or (lambda: JobRunner(config.runner))
-        self.spool = AttemptSpool(config.worker.spool_root)
-        self.worker_id: str | None = None
-        self._stopped = False
-
-    def close(self) -> None:
-        if self._owns_client:
-            self.client.close()
-
-    def __enter__(self) -> "NetworkWorker":
+        self._thread = threading.Thread(target=run, name="histra-heartbeat", daemon=True)
+        self._thread.start()
         return self
 
-    def __exit__(self, *_: object) -> None:
-        self.close()
+    def __exit__(self, *_args) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(1.0, self.interval * 2))
 
-    def check_server(self) -> dict[str, Any]:
-        return self.client.ready()
 
-    def register(self) -> dict[str, Any]:
-        response = self.client.register_worker(
-            name=self.config.worker.name,
-            max_parallel_jobs=self.config.worker.max_parallel_jobs,
-            worker_version=RUNNER_VERSION,
-            solver_version=self.config.worker.solver_version,
-            metadata=self._worker_metadata(),
+@dataclass
+class Worker:
+    client: ServerClient
+    executor: RunnerExecutor
+    work_root: Path
+    runner_name: str
+    runner_version: str = "1.0.0"
+    runner_id: str | None = None
+    capabilities: dict = field(default_factory=dict)
+    heartbeat_interval_seconds: float = 30.0
+    keep_workspaces: bool = False
+
+    def register(self) -> str:
+        self.runner_id = self.client.register(
+            runner_id=self.runner_id,
+            name=self.runner_name,
+            version=self.runner_version,
+            capabilities=self.capabilities,
         )
-        worker_id = response.get("id")
-        if not isinstance(worker_id, str) or not worker_id:
-            raise NetworkWorkerError("Worker registration returned no worker ID.")
-        if response.get("enabled") is False:
-            raise NetworkWorkerError("This worker is disabled on the server.")
-        self.worker_id = worker_id
-        write_json_atomic(
-            self.config.worker.spool_root / "worker.json",
-            {
-                "worker_id": worker_id,
-                "name": self.config.worker.name,
-                "server_base_url": self.config.server.base_url,
-                "registered_at": utc_now_iso(),
-                "response": response,
-            },
-        )
-        return response
+        return self.runner_id
 
-    def stop(self) -> None:
-        self._stopped = True
-
-    def run_once(self) -> list[ProcessResult]:
-        self.check_server()
-        self.register()
-        assert self.worker_id is not None
-        records = list(self.spool.records())
-        available = max(0, self.config.worker.max_parallel_jobs - len(records))
-        for _ in range(available):
-            claim = self.client.claim(self.worker_id)
-            if claim is None:
-                break
-            records.append(
-                self.spool.create(
-                    claim,
-                    worker_id=self.worker_id,
-                    server_base_url=self.config.server.base_url,
-                )
-            )
-        return [self._process_record(record) for record in records]
-
-    def run_forever(self) -> None:
-        while not self._stopped:
-            try:
-                self.run_once()
-            except ServerRequestError as exc:
-                logger.warning("Network worker poll failed: %s", exc)
-            if not self._stopped:
-                time.sleep(self.config.worker.poll_seconds)
-
-    def _process_record(self, record: AttemptRecord) -> ProcessResult:
-        claim = record.claim
-        workspace = self.config.runner.workspace_root / claim.job_id / claim.attempt_id
+    def run_once(self) -> bool:
+        runner_id = self.runner_id or self.register()
+        claim = self.client.claim(runner_id)
+        if claim is None:
+            return False
+        workspace = self.work_root / claim.job_id / claim.attempt_id
+        if workspace.exists():
+            shutil.rmtree(workspace)
+        workspace.mkdir(parents=True)
+        package_path = workspace / "package.zip"
         try:
-            run_path = workspace / "output" / "run.json"
-            if not record.job_path.is_file():
-                record.transition("downloading")
-                self.client.attempt_heartbeat(
-                    claim, status="downloading", progress={"stage": "package"}
+            package_path.write_bytes(self.client.download_package(claim, runner_id))
+            with HeartbeatLoop(
+                self.client,
+                claim,
+                runner_id,
+                self.heartbeat_interval_seconds,
+            ) as heartbeat:
+                outcome = self.executor.execute_package(
+                    package_path,
+                    workspace,
+                    runner_id=runner_id,
+                    claim=claim,
                 )
-                if not record.package_zip.is_file():
-                    self.client.download_package(claim, record.package_zip)
-                self.spool.extract_package(
-                    record, maximum_bytes=self.config.server.maximum_package_bytes
-                )
-            if run_path.is_file():
-                run_payload = read_json(run_path)
-                if isinstance(run_payload, dict) and run_payload.get("status") == "completed":
-                    return self._upload_completed(record, workspace)
-
-            record.transition("running")
-            self.client.attempt_heartbeat(
-                claim, status="running", progress={"stage": "solver"}
-            )
-            outcome = self.runner_factory().run_job_file(record.job_path)
-            record.transition("completed_local", workspace=str(outcome.workspace))
-            return self._upload_completed(record, outcome.workspace)
-        except JobRunError as exc:
-            failure_path = exc.workspace / "output" / "failure.json"
-            failure = read_json(failure_path) if failure_path.is_file() else {}
-            return self._report_failure(record, exc.workspace, failure, exc)
-        except ServerRequestError as exc:
-            record.transition("network_pending", reason=str(exc))
-            return ProcessResult(claim.job_id, claim.attempt_id, "network_pending", str(exc))
+            if heartbeat.error is not None:
+                raise heartbeat.error
+            self.client.submit_results(claim, outcome.envelope)
         except Exception as exc:
-            return self._report_failure(record, workspace, {}, exc)
-
-    def _upload_completed(self, record: AttemptRecord, workspace: Path) -> ProcessResult:
-        results_path = workspace / "output" / "results.json"
-        run_path = workspace / "output" / "run.json"
-        if not results_path.is_file() or not run_path.is_file():
-            raise NetworkWorkerError(f"Completed workspace is missing results files: {workspace}")
-        run_payload = read_json(run_path)
-        validation_path = record.directory / "validation.json"
-        write_json_atomic(
-            validation_path,
-            {
-                "schema_version": "1.0",
-                "job_id": record.claim.job_id,
-                "attempt_id": record.claim.attempt_id,
-                "validation": run_payload.get("validation", []),
-                "mutations": run_payload.get("mutations", []),
-            },
-        )
-        solver_log = self._combine_solver_logs(workspace, record.directory / "solver.log")
-        record.transition("uploading")
-        self.client.attempt_heartbeat(
-            record.claim, status="uploading", progress={"stage": "results"}
-        )
-        response = self.client.upload_results(
-            record.claim,
-            results_path=results_path,
-            run_path=run_path,
-            validation_path=validation_path,
-            solver_log_path=solver_log,
-        )
-        record.transition(
-            "accepted",
-            server_job_status=response.get("status"),
-            accepted_at=utc_now_iso(),
-        )
-        if self.config.worker.cleanup_package_on_accept:
-            self.spool.remove_package(record)
-        if self.config.worker.cleanup_workspace_on_accept:
+            self.client.submit_failure(claim, runner_id=runner_id, error=exc)
+            if not self.keep_workspaces:
+                shutil.rmtree(workspace, ignore_errors=True)
+            return True
+        if not self.keep_workspaces:
             shutil.rmtree(workspace, ignore_errors=True)
-        return ProcessResult(
-            record.claim.job_id,
-            record.claim.attempt_id,
-            "accepted",
-            "Server accepted results.",
-        )
-
-    def _report_failure(
-        self,
-        record: AttemptRecord,
-        workspace: Path,
-        failure: dict[str, Any],
-        exc: Exception,
-    ) -> ProcessResult:
-        reason = str(failure.get("message") or exc)
-        solver = failure.get("solver") if isinstance(failure.get("solver"), dict) else {}
-        exit_code = solver.get("return_code") if isinstance(solver.get("return_code"), int) else None
-        record.transition("failure_local", reason=reason)
-        try:
-            response = self.client.report_failure(
-                record.claim,
-                reason=reason,
-                retryable=bool(failure.get("retryable", True)),
-                exit_code=exit_code,
-                run=failure or None,
-                validation={"workspace": str(workspace)},
-            )
-        except ServerRequestError as network_error:
-            record.transition("failure_local", report_error=str(network_error))
-            return ProcessResult(
-                record.claim.job_id,
-                record.claim.attempt_id,
-                "failure_local",
-                str(network_error),
-            )
-        record.transition(
-            "failure_reported",
-            server_job_status=response.get("status"),
-            reported_at=utc_now_iso(),
-        )
-        return ProcessResult(
-            record.claim.job_id, record.claim.attempt_id, "failure_reported", reason
-        )
-
-    @staticmethod
-    def _combine_solver_logs(
-        workspace: Path, destination: Path, *, maximum_bytes: int = 10 * 1024 * 1024
-    ) -> Path | None:
-        logs = sorted((workspace / "logs").glob("*.log"))
-        if not logs:
-            return None
-        written = 0
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        with destination.open("wb") as output:
-            for path in logs:
-                header = f"\n===== {path.name} =====\n".encode()
-                if written + len(header) > maximum_bytes:
-                    break
-                output.write(header)
-                written += len(header)
-                data = path.read_bytes()[: maximum_bytes - written]
-                output.write(data)
-                written += len(data)
-                if written >= maximum_bytes:
-                    break
-        return destination
-
-    def _worker_metadata(self) -> dict[str, Any]:
-        metadata = dict(self.config.worker.metadata)
-        existing = metadata.get("capabilities", [])
-        if isinstance(existing, str):
-            existing = [existing]
-        metadata.update(
-            {
-                "workspace_root": str(self.config.runner.workspace_root),
-                "spool_root": str(self.config.worker.spool_root),
-                "protocol_versions": sorted(SUPPORTED_PACKAGE_PROTOCOLS),
-                "job_schema_versions": sorted(SUPPORTED_JOB_SCHEMA_VERSIONS),
-                "capabilities": sorted(set(RUNNER_CAPABILITIES) | {str(x) for x in existing}),
-                "solver_backend": self.config.runner.backend.type,
-            }
-        )
-        return metadata
+        return True
