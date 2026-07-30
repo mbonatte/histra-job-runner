@@ -23,7 +23,13 @@ class PackageContents:
 
 def _safe_name(name: str) -> PurePosixPath:
     path = PurePosixPath(name)
-    if not name or path.is_absolute() or ".." in path.parts or "\\" in name:
+    if (
+        not name
+        or "\x00" in name
+        or path.is_absolute()
+        or ".." in path.parts
+        or "\\" in name
+    ):
         raise PackageValidationError(f"unsafe ZIP entry: {name!r}")
     return path
 
@@ -47,13 +53,20 @@ def _extract_safely(
         if len(infos) > max_files:
             raise PackageValidationError("package contains too many files")
         for info in infos:
-            path = _safe_name(info.filename)
-            if info.filename in names:
-                raise PackageValidationError(f"duplicate ZIP entry: {info.filename}")
-            names.add(info.filename)
+            # Use the original archive name. On Windows, ZipInfo.filename
+            # normalizes backslashes to forward slashes before validation.
+            raw_name = info.orig_filename
+            path = _safe_name(raw_name)
+
+            if raw_name in names:
+                raise PackageValidationError(f"duplicate ZIP entry: {raw_name}")
+            names.add(raw_name)
+
             mode = info.external_attr >> 16
             if stat.S_ISLNK(mode):
-                raise PackageValidationError(f"symbolic links are forbidden: {info.filename}")
+                raise PackageValidationError(
+                    f"symbolic links are forbidden: {raw_name}"
+                )
             if info.is_dir():
                 continue
             total += info.file_size
@@ -63,7 +76,7 @@ def _extract_safely(
             target.parent.mkdir(parents=True, exist_ok=True)
             data = archive.read(info)
             if len(data) != info.file_size:
-                raise PackageValidationError(f"truncated ZIP entry: {info.filename}")
+                raise PackageValidationError(f"truncated ZIP entry: {raw_name}")
             target.write_bytes(data)
     return names
 

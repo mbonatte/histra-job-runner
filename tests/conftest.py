@@ -67,9 +67,16 @@ def package_factory(job):
             archive.writestr("job.json", job_bytes)
             archive.writestr(manifest["hrx"]["path"], hrx)
             for name, data, *attrs in extra_entries or []:
-                info = zipfile.ZipInfo(name)
+                # ZipInfo(name) normalizes backslashes on Windows. Construct it
+                # first, then assign filename directly so the test ZIP contains
+                # the exact potentially unsafe archive name.
+                info = zipfile.ZipInfo("placeholder")
+                info.filename = name
+                info.orig_filename = name
+
                 if attrs:
                     info.external_attr = attrs[0]
+
                 archive.writestr(info, data)
         return manifest
     return make
