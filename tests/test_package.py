@@ -106,3 +106,24 @@ def test_invalid_zip_is_rejected(tmp_path):
     path.write_bytes(b"not a zip")
     with pytest.raises(PackageValidationError, match="invalid ZIP"):
         validate_package(path, tmp_path / "out")
+
+
+def test_missing_required_metadata_is_rejected(tmp_path):
+    path = tmp_path / "missing.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("job.json", b"{}")
+    with pytest.raises(PackageValidationError, match="must contain"):
+        validate_package(path, tmp_path / "out")
+
+
+def test_duplicate_entries_are_rejected(tmp_path, package_factory):
+    path = tmp_path / "duplicate.zip"
+    package_factory(path)
+    rewritten = tmp_path / "rewritten.zip"
+    with zipfile.ZipFile(path) as source, zipfile.ZipFile(rewritten, "w") as target:
+        for info in source.infolist():
+            target.writestr(info, source.read(info))
+        with pytest.warns(UserWarning, match="Duplicate name"):
+            target.writestr("job.json", b"{}")
+    with pytest.raises(PackageValidationError, match="duplicate"):
+        validate_package(rewritten, tmp_path / "out")

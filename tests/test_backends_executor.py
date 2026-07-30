@@ -91,3 +91,46 @@ def test_command_backend_requires_output_files(valid_package, tmp_path):
     backend = CommandBackend([sys.executable, "-c", "print('nothing')"])
     with pytest.raises(BackendError, match="did not create"):
         backend.execute(package, tmp_path / "output")
+
+
+def raising_adapter(package, output_dir):
+    raise ValueError("adapter exploded")
+
+
+def test_python_backend_exception_is_wrapped(valid_package, tmp_path):
+    package, manifest = valid_package
+    backend = PythonBackend("test_backends_executor:raising_adapter")
+    with pytest.raises(BackendError, match="adapter exploded"):
+        RunnerExecutor(backend).execute_package(
+            package, tmp_path / "work", runner_id="r", claim=make_claim(manifest)
+        )
+
+
+def test_command_backend_unknown_placeholder(valid_package, tmp_path):
+    package_path, _ = valid_package
+    package = validate_package(package_path, tmp_path / "input")
+    backend = CommandBackend([sys.executable, "{unknown}"])
+    with pytest.raises(BackendError, match="unknown command placeholder"):
+        backend.execute(package, tmp_path / "output")
+
+
+def test_command_backend_timeout_is_wrapped(valid_package, tmp_path):
+    package_path, _ = valid_package
+    package = validate_package(package_path, tmp_path / "input")
+    backend = CommandBackend(
+        [sys.executable, "-c", "import time;time.sleep(1)"], timeout_seconds=0.01
+    )
+    with pytest.raises(BackendError, match="could not complete"):
+        backend.execute(package, tmp_path / "output")
+
+
+def test_command_backend_rejects_non_object_output(valid_package, tmp_path):
+    package_path, _ = valid_package
+    package = validate_package(package_path, tmp_path / "input")
+    script = (
+        "import pathlib,sys; out=pathlib.Path(sys.argv[1]); out.mkdir(parents=True,exist_ok=True); "
+        "(out/'results.json').write_text('[]'); (out/'run.json').write_text('{{}}')"
+    )
+    backend = CommandBackend([sys.executable, "-c", script, "{output}"])
+    with pytest.raises(BackendError, match="JSON object"):
+        backend.execute(package, tmp_path / "output")

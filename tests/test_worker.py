@@ -107,3 +107,19 @@ def test_heartbeat_loop_runs(valid_package):
     with HeartbeatLoop(client, claim, "runner-1", 0.01):
         time.sleep(0.035)
     assert client.heartbeats >= 2
+
+
+def test_worker_registers_automatically_and_can_keep_workspace(valid_package, tmp_path):
+    package_path, manifest = valid_package
+    client = FakeClient(package_path.read_bytes(), claim_from_manifest(manifest))
+    worker = Worker(
+        client=client,
+        executor=RunnerExecutor(Backend()),
+        work_root=tmp_path / "work",
+        runner_name="test",
+        heartbeat_interval_seconds=0,
+        keep_workspaces=True,
+    )
+    assert worker.run_once() is True
+    assert worker.runner_id == "generated-runner"
+    assert (tmp_path / "work" / "job-001" / "attempt-001").exists()
