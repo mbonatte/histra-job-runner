@@ -1,9 +1,0 @@
-{
-  "job_id": "first-bridge",
-  "attempt_id": "attempt-288a951f3e48",
-  "status": "failed",
-  "failed_at": "2026-07-29T06:45:52.842070Z",
-  "backend": "python",
-  "error_type": "HrxValidationError",
-  "message": "No bottom foundation interfaces were found for pier 'pier_1'."
-}
