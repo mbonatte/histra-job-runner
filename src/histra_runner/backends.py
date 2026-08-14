@@ -51,6 +51,10 @@ class CommandBackend:
         self.timeout_seconds = timeout_seconds
         self.environment = environment or {}
 
+    @property
+    def capabilities(self) -> dict[str, Any]:
+        return {"backend": "command", "command": self.command[0]}
+
     def execute(self, package: PackageContents, output_dir: Path) -> ExecutionResult:
         output_dir.mkdir(parents=True, exist_ok=True)
         values = {
@@ -90,11 +94,15 @@ class CommandBackend:
 
 
 class PythonBackend:
-    """Load a trusted in-process adapter as `module:function`."""
+    """Load a trusted in-process adapter as ``module:function``."""
 
     def __init__(self, target: str):
         self.target = target
         self._callable = self._resolve(target)
+
+    @property
+    def capabilities(self) -> dict[str, Any]:
+        return {"backend": "custom-python", "target": self.target}
 
     @staticmethod
     def _resolve(target: str) -> Callable[[PackageContents, Path], Any]:
@@ -124,4 +132,6 @@ class PythonBackend:
                 )
             except (KeyError, TypeError) as exc:
                 raise BackendError("Python backend returned an invalid mapping") from exc
-        raise BackendError("Python backend must return ExecutionResult or a result mapping")
+        raise BackendError(
+            "Python backend must return ExecutionResult or a result mapping"
+        )

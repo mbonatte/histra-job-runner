@@ -1,9 +1,17 @@
 # Changelog
 
-## 1.0.0 - 2026-07-30
+## 1.1.0 — 2026-07-31
 
-- Replaced experimental package handling with the strict package protocol 1.0.
-- Added safe extraction and complete identity/digest validation.
-- Introduced stable command and Python analysis adapters.
-- Added worker registration, claims, heartbeats, result/failure uploads, cleanup,
-  and adversarial tests.
+- Make histra-python a required, pinned installation dependency.
+- Add the built-in `HiStrAPythonBackend` and select it when no override is supplied.
+- Translate canonical JOB analyses, output requests, timeouts, combination rows and concrete interface mutations into the public histra-python API.
+- Upload JSON-safe projected reactions, model-point displacements, mutation reports and execution provenance.
+- Preserve custom Python and command adapters as explicit overrides.
+- Advertise backend and histra-python capabilities during runner registration.
+- Retry transient worker-cycle failures without terminating the continuous process.
+- Add Windows installation and Scheduled Task guidance.
+- Add regression tests and an optional real-HRX numerical release gate.
+
+## 1.0.0
+
+- Introduced canonical package validation, generic execution adapters and the network worker protocol.

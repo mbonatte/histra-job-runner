@@ -53,20 +53,13 @@ def _extract_safely(
         if len(infos) > max_files:
             raise PackageValidationError("package contains too many files")
         for info in infos:
-            # Use the original archive name. On Windows, ZipInfo.filename
-            # normalizes backslashes to forward slashes before validation.
             raw_name = info.orig_filename
             path = _safe_name(raw_name)
-
             if raw_name in names:
                 raise PackageValidationError(f"duplicate ZIP entry: {raw_name}")
             names.add(raw_name)
-
-            mode = info.external_attr >> 16
-            if stat.S_ISLNK(mode):
-                raise PackageValidationError(
-                    f"symbolic links are forbidden: {raw_name}"
-                )
+            if stat.S_ISLNK(info.external_attr >> 16):
+                raise PackageValidationError(f"symbolic links are forbidden: {raw_name}")
             if info.is_dir():
                 continue
             total += info.file_size
@@ -101,10 +94,8 @@ def validate_package(
         max_files=max_files,
         max_uncompressed_bytes=max_uncompressed_bytes,
     )
-    required = {"manifest.json", "job.json"}
-    if not required.issubset(names):
+    if not {"manifest.json", "job.json"}.issubset(names):
         raise PackageValidationError("package must contain manifest.json and job.json")
-
     try:
         manifest = PackageManifest.model_validate_json(
             (destination / "manifest.json").read_bytes()
@@ -113,7 +104,6 @@ def validate_package(
         job = json.loads(job_bytes)
     except Exception as exc:
         raise PackageValidationError(f"invalid package metadata: {exc}") from exc
-
     if job_bytes != canonical_json_bytes(job):
         raise PackageValidationError("job.json is not canonical JSON")
     digest = job_sha256(job)
@@ -121,11 +111,11 @@ def validate_package(
         raise PackageValidationError("JOB digest does not match manifest")
     if job.get("job_id") != manifest.job_id:
         raise PackageValidationError("JOB identity does not match manifest")
-
     hrx_rel = _safe_name(manifest.hrx.path)
-    expected_names = {"manifest.json", "job.json", manifest.hrx.path}
-    if names != expected_names:
-        raise PackageValidationError("package must contain exactly manifest, JOB, and declared HRX")
+    if names != {"manifest.json", "job.json", manifest.hrx.path}:
+        raise PackageValidationError(
+            "package must contain exactly manifest, JOB, and declared HRX"
+        )
     hrx_path = destination.joinpath(*hrx_rel.parts)
     try:
         hrx = hrx_path.read_bytes()
@@ -135,7 +125,6 @@ def validate_package(
         raise PackageValidationError("HRX size does not match manifest")
     if sha256_hex(hrx) != manifest.hrx.sha256:
         raise PackageValidationError("HRX digest does not match manifest")
-
     checks = [
         ("job id", expected_job_id, manifest.job_id),
         ("attempt id", expected_attempt_id, manifest.attempt_id),
@@ -145,7 +134,6 @@ def validate_package(
     for label, expected, actual in checks:
         if expected is not None and expected != actual:
             raise PackageValidationError(f"{label} does not match the active claim")
-
     return PackageContents(
         manifest=manifest,
         job=job,

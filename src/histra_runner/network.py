@@ -33,7 +33,7 @@ class ServerClient:
     def __enter__(self) -> "ServerClient":
         return self
 
-    def __exit__(self, *_args) -> None:
+    def __exit__(self, *_args: object) -> None:
         self.close()
 
     @staticmethod

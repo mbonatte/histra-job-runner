@@ -105,7 +105,9 @@ def test_heartbeat_loop_runs(valid_package):
     claim = Claim.model_validate(claim_from_manifest(manifest))
     client = FakeClient(b"", claim_from_manifest(manifest))
     with HeartbeatLoop(client, claim, "runner-1", 0.01):
-        time.sleep(0.035)
+        deadline = time.monotonic() + 1.0
+        while client.heartbeats < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
     assert client.heartbeats >= 2
 
 

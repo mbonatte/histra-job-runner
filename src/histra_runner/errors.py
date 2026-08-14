@@ -1,14 +1,8 @@
 class RunnerError(Exception):
-    """Base runner exception."""
-
-
+    pass
 class PackageValidationError(RunnerError):
-    """A downloaded package is unsafe, corrupt, or has mismatched provenance."""
-
-
+    pass
 class BackendError(RunnerError):
-    """The configured analysis backend failed or violated its contract."""
-
-
+    pass
 class ServerError(RunnerError):
-    """The runner could not complete a server protocol operation."""
+    pass
