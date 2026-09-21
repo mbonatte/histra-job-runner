@@ -28,7 +28,7 @@ class Worker:
     executor: RunnerExecutor
     work_root: Path
     runner_name: str
-    runner_version: str = "1.1.0"
+    runner_version: str = "1.2.0"
     runner_id: str | None = None
     capabilities: dict = field(default_factory=dict)
     heartbeat_interval_seconds: float = 30.0

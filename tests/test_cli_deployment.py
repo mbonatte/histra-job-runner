@@ -49,7 +49,7 @@ def test_environment_defaults(monkeypatch):
 def test_packaging_declares_required_histra_python_dependency():
     root = Path(__file__).parents[1]
     pyproject = (root / "pyproject.toml").read_text()
-    assert 'version = "1.1.0"' in pyproject
+    assert 'version = "1.2.0"' in pyproject
     assert "histra-python @ git+https://github.com/mbonatte/histra-python.git@" in pyproject
     assert "git" in (root / "Dockerfile").read_text()
-    assert __version__ == "1.1.0"
+    assert __version__ == "1.2.0"
